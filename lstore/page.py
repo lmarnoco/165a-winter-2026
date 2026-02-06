@@ -1,4 +1,3 @@
-
 class Page:
 
     def __init__(self):
@@ -6,9 +5,21 @@ class Page:
         self.data = bytearray(4096)
 
     def has_capacity(self):
-        pass
+        current_use = self.num_records*8
+        current_capacity = 4096 - current_use
+        return current_capacity >= 8
 
     def write(self, value):
+        if not self.has_capacity(): 
+            return False
+        offset = self.num_records * 8
+        #write the value to the array at position offset
+        self.data[offset:offset+8] = value.to_bytes(8, byteorder='little', signed=True)
         self.num_records += 1
-        pass
-
+        return True
+    
+    def read(self, index):
+        if index >= self.num_records:
+            raise IndexError(f"Index {index} out of range")
+        offset = index*8
+        return int.from_bytes(self.data[offset:offset+8], byteorder='little', signed=True)
