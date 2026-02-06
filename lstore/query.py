@@ -21,8 +21,22 @@ class Query:
     # Return False if record doesn't exist or is locked due to 2PL
     """
     def delete(self, primary_key):
-        pass
-    
+        
+        locations = self.index.locate(self.table.key, primary_key)
+        
+        #Add Lock Check  later
+        if len(locations) <= 0:
+            return False 
+        
+        for rid in locations:
+            for page_id, records in self.table.page_directory.items():
+                for i, record in enumerate(records):
+                    if record.rid == rid:
+                        record.columns = [None] * len(record.columns)
+                        break
+
+        return True;           
+
     
     """
     # Insert a record with specified columns
