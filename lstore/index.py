@@ -14,6 +14,7 @@ class Index:
     """
 
     def locate(self, column, value):
+        #Can you return an array so that I can implement it into my Query
         pass
 
     """
