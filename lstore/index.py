@@ -30,6 +30,18 @@ class Index:
     """
 
     def locate_range(self, begin, end, column):
+        if self.indices[column] is None:
+            return []
+
+        rids = []
+        index_map = self.indices[column]
+        
+        #iterate over all keys in index & check range
+        for key, val_rids in index_map.items():
+            if begin <= key <= end:
+                rids.extend(val_rids)
+                
+        return rids
         
 
     """
