@@ -67,7 +67,7 @@ class Table:
         if not self.tail_pages:
             return False
         else:
-            return self.tail_pages[-1][0].has_capacity()
+            return self.tail_pages[-1][0].has_capacity() # -----------!! I think the -1 here should be range_id !! ------------
 
 
     # RID helpers 
@@ -91,7 +91,7 @@ class Table:
             pages = self.tail_pages
         else: 
             if not self.base_capacity():
-                self.new_pages(is_tail = True)
+                self.new_pages(is_tail = True) # -------!! should be False !!----------
             pages = self.base_pages
         
         pages_id = len(pages) - 1
@@ -102,6 +102,10 @@ class Table:
             temp = pageset[col_id].write(int(val))
             if not temp: 
                 raise RuntimeError("page has no capacity")
+
+        # -----------!! need to update page directory !!-------------
+        # rid = values[RID_COLUMN]
+        # self.page_directory[rid] = (is_tail, pages_id, index)
 
         return pages_id, index
 
