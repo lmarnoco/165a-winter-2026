@@ -20,10 +20,14 @@ class Index:
 
     def locate(self, column, value):
         #Can you return an array so that I can implement it into my Query
+        #Check if an index actually exists for this column.
+        # If not -> return an empty list to prevent crashing.
         if self.indices[column] is None:
             return []
 
-        return list(self.indices[column].get(value, set()))
+        rids = self.indices[column].get(value, set())
+
+        return list(rids)
 
     """
     # Returns the RIDs of all records with values in column "column" between "begin" and "end"
@@ -34,6 +38,7 @@ class Index:
             return []
 
         rids = []
+        #hashmap because its in-place
         index_map = self.indices[column]
         
         #iterate over all keys in index & check range
@@ -49,11 +54,36 @@ class Index:
     """
 
     def create_index(self, column_number):
-        pass
+        if self.indices[column_number] is None:
+            self.indices[column_number] = {}
 
     """
     # optional: Drop index of specific column
     """
 
     def drop_index(self, column_number):
-        pass
+        self.indices[column_number] = None
+
+#helper functions: (we need them because otherwise data doesn't enter into the index)
+    def add_entry(self, column_number, rid, value):
+        if self.indices[column_number] is None: return
+        if value not in self.indices[column_number]:
+            self.indices[column_number][value] = set()
+        self.indices[column_number][value].add(rid)
+
+    def remove_entry(self, column_number, rid, value):
+        if self.indices[column_number] is None: 
+            return
+            #Check if the value exists in the index
+        if value in self.indices[column_number]:
+            #Check if the RID is missing
+            self.indices[column_number][value].discard(rid)
+
+    def update_entry(self, column_number, rid, old_value, new_value):
+       #If value didn't actually change -> nothing
+        if old_value == new_value: 
+            return
+            #Remove RID from old value
+        self.remove_entry(column_number, rid, old_value)
+        #Add RID to new value
+        self.add_entry(column_number, rid, new_value)
