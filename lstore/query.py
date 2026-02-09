@@ -143,7 +143,7 @@ class Query:
         if len(rids_list) <= 0:
             return False
         
-        update_columns =  {i: val for i, val in enumerate(columns) if val is not None}
+        update_columns =  {i: val for i, val in enumerate(columns) if val is not None and i != self.table.key}
 
         #Expect 1
         for rids in rids_list:
