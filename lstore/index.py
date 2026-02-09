@@ -19,7 +19,6 @@ class Index:
     """
 
     def locate(self, column, value):
-        #Can you return an array so that I can implement it into my Query
         #Check if an index actually exists for this column.
         # If not -> return an empty list to prevent crashing.
         if self.indices[column] is None:
@@ -45,6 +44,8 @@ class Index:
         for key, val_rids in index_map.items():
             if begin <= key <= end:
                 rids.extend(val_rids)
+        
+        rids = [rid for rid in rids if rid not in self.table.deleted]
                 
         return rids
         
