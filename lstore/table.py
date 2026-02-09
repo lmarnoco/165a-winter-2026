@@ -174,30 +174,36 @@ class Table:
         curr_vals = self.latest_cols(base_rid)
         new_vals = curr_vals.copy()
         for col_ids, val in update_cols.items():
-            new_vals[col_ids] = val
+            #if val is not None: #Delete
+                new_vals[col_ids] = val
         
         curr_schema = self.base_schema.get(base_rid, 0)
         new_schema = curr_schema
-        for col_ids in update_cols.keys():
-            new_schema |= (1 << col_ids)
+        for col_ids, val in update_cols.items(): #Change
+            #if val is not None:
+                new_schema |= (1 << col_ids)
 
         curr_time = int(time())
 
         values = [0] * self.total_columns
-        values[INDIRECTION_COLUMN] = last_tail_rid
+        values[INDIRECTION_COLUMN] = last_tail_rid  
         values[RID_COLUMN] = tail_rid
         values[TIMESTAMP_COLUMN] = curr_time
         values[SCHEMA_ENCODING_COLUMN] = new_schema
         values[4:] = new_vals
 
+        # while not self.tail_capacity():
+        #     self.new_pages(is_tail = True) #Delete
         pages_id, index = self.write_record(is_tail = True, values = values)
 
         self.base_indirection[base_rid] = tail_rid
         self.base_schema[base_rid] = new_schema
 
         for col_ids, val in update_cols.items():
-            old_val = curr_vals[col_ids]
-            self.index.update_entry(col_ids, base_rid, old_val, val)
+            #if val is not None:
+                old_val = curr_vals[col_ids]
+                self.index.update_entry(col_ids, base_rid, old_val, val)
+                curr_vals[col_ids] = val
 
         return tail_rid
         

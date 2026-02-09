@@ -1,4 +1,4 @@
-from lstore.table import Table, Record
+from lstore.table import Table, Record, INDIRECTION_COLUMN, INVALID_RID
 from lstore.index import Index
 
 
@@ -98,16 +98,33 @@ class Query:
 
         #Iterates through all locations appending to list
         for rids in rids_list:
-            past_rid = self.table.get_previous_rid(rids, relative_version)
+
+            if relative_version <= 0:
+                steps_back = -relative_version
+            else:
+                steps_back = relative_version
+            past_rid = self.table.get_previous_rid(rids, steps_back)
 
             cols = [None] * self.table.num_columns
             for c in range(self.table.num_columns):
-                if projected_columns_index[c] == 1: 
-                    cols[c] = self.table.read_val(past_rid, 4 + c)
+                current = past_rid
+                while True:
+                    schema = self.table.get_schemaenc(current)
+                    if(schema >> c) & 1 == 1:
+                        cols[c] = self.table.read_val(current, 4 + c)
+                        break
+                    prev = self.table.read_val(current, INDIRECTION_COLUMN)
+                    if prev == INVALID_RID:
+                        cols[c] = self.table.read_val(current, 4 + c)
+                        break
+                    current = prev
+
+
+
 
             key_val = self.table.read_val(past_rid, 4 + self.table.key)
 
-            result.append(Record(rids, key_val, cols))
+            result.append(Record(past_rid, key_val, cols))
     
         return result
         
@@ -201,7 +218,13 @@ class Query:
             return False
         
         for rids in rids_list:
-            past_rids = self.table.get_previous_rid(rids, relative_version)
+
+            if relative_version <= 0:
+                steps_back = -relative_version
+            else:
+                steps_back = relative_version
+
+            past_rids = self.table.get_previous_rid(rids, steps_back)
             val = self.table.read_val(past_rids, 4 + aggregate_column_index)
             result += val
         
