@@ -234,7 +234,7 @@ class Table:
         
         self.deleted.add(base_rid)
 
-        return True;
+        return True;    
 
 
     # merge is milestone 2? 
@@ -244,3 +244,13 @@ class Table:
         pass
  
 
+    #Iterates through Previous RID until desired
+    def get_previous_rid(self, base_rid: int, version: int):
+        rid = self.latest_rid(base_rid)
+
+        for _ in range(version):
+            prev_rid = self.read_val(rid, INDIRECTION_COLUMN)
+            if prev_rid == INVALID_RID:
+                return base_rid
+            rid = prev_rid
+        return rid

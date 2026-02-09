@@ -22,31 +22,39 @@ class Query:
     """
     def delete(self, primary_key):
         
-        locations = self.index.locate(self.table.key, primary_key)
-        
+        locations = self.table.index.locate(self.table.key, primary_key)
+        success = False
+
         #Add Lock Check  later
         if len(locations) <= 0:
             return False 
         
-        for rid in locations:
-            for page_id, records in self.table.page_directory.items():
-                for i, record in enumerate(records):
-                    if record.rid == rid:
-                        record.columns = [None] * len(record.columns)
-                        break
+        
+        for RID in locations:
+            if self.table.delete(RID):
+                success = True
+        
+        return success
 
-        return True;           
 
-    
     """
     # Insert a record with specified columns
     # Return True upon succesful insertion
     # Returns False if insert fails for whatever reason
     """
     def insert(self, *columns):
-        schema_encoding = '0' * self.table.num_columns
-        pass
 
+        key_val = columns[self.table.key]
+        #If insert_base_record fails 
+        if len(self.table.index.locate(self.table.key, key_val)):
+            return False
+        
+        try: 
+            self.table.insert_base_record(columns)
+            return True
+        except Exception:
+            return False
+            
     
     """
     # Read matching record with specified search key
@@ -58,8 +66,18 @@ class Query:
     # Assume that select will never be called on a key that doesn't exist
     """
     def select(self, search_key, search_key_index, projected_columns_index):
-        pass
+        
+        rids_list = self.table.index.locate(search_key_index, search_key)
 
+        #Check if None Maybe? (Will add if need be)
+
+        result = []
+
+        for RID in rids_list:
+            result.append(self.table.read_record(RID, projected_columns_index))
+        
+        return result
+    
     
     """
     # Read matching record with specified search key
@@ -72,7 +90,27 @@ class Query:
     # Assume that select will never be called on a key that doesn't exist
     """
     def select_version(self, search_key, search_key_index, projected_columns_index, relative_version):
-        pass
+
+        #Gets latest RIDs at location of Desired Version
+        rids_list = self.table.index.locate(search_key_index, search_key)
+
+        result = []
+
+        #Iterates through all locations appending to list
+        for rids in rids_list:
+            past_rid = self.table.get_previous_rid(rids, relative_version)
+
+            cols = [None] * self.table.num_columns
+            for c in range(self.table.num_columns):
+                if projected_columns_index[c] == 1: 
+                    cols[c] = self.table.read_val(past_rid, 4 + c)
+
+            key_val = self.table.read_val(past_rid, 4 + self.table.key)
+
+            result.append(Record(rids, key_val, cols))
+    
+        return result
+        
 
     
     """
@@ -81,7 +119,20 @@ class Query:
     # Returns False if no records exist with given key or if the target record cannot be accessed due to 2PL locking
     """
     def update(self, primary_key, *columns):
-        pass
+
+        rids_list = self.table.index.locate(self.table.key, primary_key)
+
+        #Or Locked during something
+        if len(rids_list) <= 0:
+            return False
+        
+        update_columns =  {i: val for i, val in enumerate(columns) if val is not None}
+
+        #Expect 1
+        for rids in rids_list:
+            self.table.update_tail_record(rids, update_columns)
+
+        return True
 
     
     """
@@ -93,7 +144,31 @@ class Query:
     # Returns False if no record exists in the given range
     """
     def sum(self, start_range, end_range, aggregate_column_index):
-        pass
+        
+        og_rids = self.table.index.locate_range(start_range, end_range, self.table.key)
+
+        rids_list = []
+
+        for rid_or_list in og_rids:
+            if isinstance(rid_or_list, list):
+                rids_list.extend(rid_or_list)
+            else:
+                rids_list.append(rid_or_list)
+
+        rids_list = [rid for rid in rids_list if rid not in self.table.deleted]
+
+        if len(rids_list) == 0:
+            return False
+
+        #Could change later
+        result = 0
+        for rids in rids_list:
+            latest_rid = self.table.latest_cols(rids)
+            result += latest_rid[aggregate_column_index]
+
+        return result
+
+                
 
     
     """
@@ -106,7 +181,32 @@ class Query:
     # Returns False if no record exists in the given range
     """
     def sum_version(self, start_range, end_range, aggregate_column_index, relative_version):
-        pass
+
+
+        og_rids = self.table.index.locate_range(start_range, end_range, self.table.key)
+
+        rids_list = []
+
+        for rid_or_list in og_rids:
+            if isinstance(rid_or_list, list):
+                rids_list.extend(rid_or_list)
+            else:
+                rids_list.append(rid_or_list)
+
+        rids_list = [rid for rid in rids_list if rid not in self.table.deleted]
+
+        result = 0
+        
+        if len(rids_list) == 0:
+            return False
+        
+        for rids in rids_list:
+            past_rids = self.table.get_previous_rid(rids, relative_version)
+            val = self.table.read_val(past_rids, 4 + aggregate_column_index)
+            result += val
+        
+        return result
+        
 
     
     """
@@ -121,7 +221,7 @@ class Query:
         r = self.select(key, self.table.key, [1] * self.table.num_columns)[0]
         if r is not False:
             updated_columns = [None] * self.table.num_columns
-            updated_columns[column] = r[column] + 1
+            updated_columns[column] = r.columns[column] + 1
             u = self.update(key, *updated_columns)
             return u
         return False
