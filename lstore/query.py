@@ -148,11 +148,12 @@ class Query:
         if not update_columns:
             return True
         
-        
+
         #Expect 1
         rid = rids_list[0]
         self.table.update_tail_record(rid, update_columns)
 
+ 
         return True
 
     

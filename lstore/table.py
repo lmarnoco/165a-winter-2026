@@ -170,10 +170,13 @@ class Table:
             raise KeyError("record has been deleted")
 
         tail_rid = self.get_RID()
-        last_tail_rid = self.base_indirection.get(base_rid, INVALID_RID)
+        #last_tail_rid = self.base_indirection.get(base_rid, INVALID_RID)
+        last_tail_rid = self.latest_rid(base_rid)
+        if last_tail_rid == base_rid:
+            last_tail_rid = INVALID_RID
 
         curr_vals = self.latest_cols(base_rid)
-        new_vals = curr_vals.copy()
+        new_vals = curr_vals.copy()     
         for col_ids, val in update_cols.items():
             #if val is not None: #Delete
                 new_vals[col_ids] = val
