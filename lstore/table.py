@@ -122,25 +122,7 @@ class Table:
 
     def latest_cols(self, base_rid: int):
         rid = self.latest_rid(base_rid)
-       # cols = [self.read_val(rid, 4 + c) for c in range(self.num_columns)]
-        cols = [None] * self.num_columns
-
-        for c in range(self.num_columns):
-            current = rid
-            while True:
-                schema = self.get_schemaenc(current)
-
-                if(schema >> c) & 1 == 1 or current == base_rid:
-                    cols[c] = self.read_val(current, c + 4)
-                    break
-
-                prev = self.read_val(current, INDIRECTION_COLUMN)
-                if prev == INVALID_RID:
-                    cols[c] = self.read_val(base_rid, 4 + c)
-                    break
-
-                current = prev
-
+        cols = [self.read_val(rid, 4 + c) for c in range(self.num_columns)]
         return cols
 
     def get_schemaenc(self, rid: int):
@@ -219,10 +201,11 @@ class Table:
         self.base_schema[base_rid] = new_schema
 
         for col_ids, val in update_cols.items():
-            #if val is not None:
-                old_val = curr_vals[col_ids]
-                self.index.update_entry(col_ids, base_rid, old_val, val)
-                curr_vals[col_ids] = val
+            if col_ids == self.key:
+                continue
+            old_val = curr_vals[col_ids]
+            self.index.update_entry(col_ids, base_rid, old_val, val)
+            curr_vals[col_ids] = val
 
         return tail_rid
         
@@ -279,4 +262,3 @@ class Table:
                 return base_rid
             rid = prev_rid
         return rid
-    
