@@ -229,7 +229,7 @@ class Table:
 
         key_val = self.read_val(rid, 4 + self.key)
 
-        return Record(base_rid, key_val, cols)
+        return Record(rid, key_val, cols)
         
 
     def delete(self, base_rid: int):
