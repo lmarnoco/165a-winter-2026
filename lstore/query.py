@@ -146,8 +146,8 @@ class Query:
         update_columns =  {i: val for i, val in enumerate(columns) if val is not None and i != self.table.key}
 
         #Expect 1
-        for rids in rids_list:
-            self.table.update_tail_record(rids, update_columns)
+        rid = rids_list[0]
+        self.table.update_tail_record(rid, update_columns)
 
         return True
 

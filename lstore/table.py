@@ -119,9 +119,28 @@ class Table:
         latest_rid = tail_rid if tail_rid != INVALID_RID else base_rid
         return latest_rid
 
+
     def latest_cols(self, base_rid: int):
         rid = self.latest_rid(base_rid)
-        cols = [self.read_val(rid, 4 + c) for c in range(self.num_columns)]
+       # cols = [self.read_val(rid, 4 + c) for c in range(self.num_columns)]
+        cols = [None] * self.num_columns
+
+        for c in range(self.num_columns):
+            current = rid
+            while True:
+                schema = self.get_schemaenc(current)
+
+                if(schema >> c) & 1 == 1 or current == base_rid:
+                    cols[c] = self.read_val(current, c + 4)
+                    break
+
+                prev = self.read_val(current, INDIRECTION_COLUMN)
+                if prev == INVALID_RID:
+                    cols[c] = self.read_val(base_rid, 4 + c)
+                    break
+
+                current = prev
+
         return cols
 
     def get_schemaenc(self, rid: int):
@@ -260,3 +279,4 @@ class Table:
                 return base_rid
             rid = prev_rid
         return rid
+    
