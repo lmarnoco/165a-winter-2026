@@ -97,7 +97,7 @@ class Query:
         result = []
 
         #Iterates through all locations appending to list
-        for rids in rids_list:
+        """ for rids in rids_list:
 
             if relative_version <= 0:
                 steps_back = -relative_version
@@ -118,9 +118,17 @@ class Query:
                         cols[c] = self.table.read_val(current, 4 + c)
                         break
                     current = prev
-
-
-
+                """
+#new logic
+#read the data directly, then loop through it
+#I think the issue with the old for loop was that it went backwards column by column, but the thing is that table actually stores cumulate updates so we can just use that. the code ends up much simpler, gotta see if it works though
+        
+        past_rid = self.table.get_previous_rid(rids, steps_back)
+            cols = [None] * self.table.num_columns
+        
+        for c in range(self.table.num_columns):
+            if projected_columns_index[c] == 1:
+                cols[c] = self.table.read_val(past_rid, 4 + c)
 
             key_val = self.table.read_val(past_rid, 4 + self.table.key)
 
