@@ -97,6 +97,7 @@ class Query:
         result = []
 
         #Iterates through all locations appending to list
+        # Saee - I think this loop logic is right? but like Tharun the storage part is missing 
         for rids in rids_list:
 
             if relative_version <= 0:
@@ -118,6 +119,9 @@ class Query:
                         cols[c] = self.table.read_val(current, 4 + c)
                         break
                     current = prev
+
+        key_val = self.table.read_val(past_rid, 4 + self.table.key)
+        result.append(Record(past_rid, key_val, cols)) # added this from the below logic to the OG loop 
                 
         #new logic
         #read the data directly, then loop through it
