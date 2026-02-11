@@ -175,10 +175,11 @@ class Table:
             raise KeyError("record has been deleted")
 
         tail_rid = self.get_RID()
-        #last_tail_rid = self.base_indirection.get(base_rid, INVALID_RID)
-        last_tail_rid = self.latest_rid(base_rid)
-        if last_tail_rid == base_rid:
-            last_tail_rid = INVALID_RID
+        last_tail_rid = self.base_indirection.get(base_rid, INVALID_RID)
+        if last_tail_rid == INVALID_RID:
+            prev_rid = base_rid
+        else:
+            prev_rid = last_tail_rid
 
         curr_vals = self.latest_cols(base_rid)
         new_vals = curr_vals.copy()     
@@ -195,7 +196,7 @@ class Table:
         curr_time = int(time())
 
         values = [0] * self.total_columns
-        values[INDIRECTION_COLUMN] = last_tail_rid  
+        values[INDIRECTION_COLUMN] = prev_rid  
         values[RID_COLUMN] = tail_rid
         values[TIMESTAMP_COLUMN] = curr_time
         values[SCHEMA_ENCODING_COLUMN] = new_schema

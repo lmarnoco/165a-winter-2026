@@ -69,12 +69,18 @@ class Query:
         
         rids_list = self.table.index.locate(search_key_index, search_key)
 
-        #Check if None Maybe? (Will add if need be)
+        #Check if None Maybe? (Will add if need be) --> added this to see if it helps
 
         result = []
+        seen_list = set()
+        for rid in rids_list:
+            if rid in seen_list:
+                continue
+            seen_list.add(rid)
 
-        for RID in rids_list:
-            result.append(self.table.read_record(RID, projected_columns_index))
+            temp = result.append(self.table.read_record(rid, projected_columns_index))
+            if temp is not None:
+                result.append(temp)
         
         return result
     

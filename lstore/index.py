@@ -16,7 +16,7 @@ class Index:
 
         # fix where we need to create index for all columns? instead of just the primary key 
         for i in range(table.num_columns):
-            self.create_index(table.key)
+            self.create_index(i)
 
     """
     # returns the location of all records with the given value on column "column"
