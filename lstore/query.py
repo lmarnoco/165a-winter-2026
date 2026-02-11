@@ -120,8 +120,8 @@ class Query:
                         break
                     current = prev
 
-        key_val = self.table.read_val(past_rid, 4 + self.table.key)
-        result.append(Record(past_rid, key_val, cols)) # added this from the below logic to the OG loop 
+            key_val = self.table.read_val(past_rid, 4 + self.table.key)
+            result.append(Record(past_rid, key_val, cols)) # added this from the below logic to the OG loop 
                 
         #new logic
         #read the data directly, then loop through it
