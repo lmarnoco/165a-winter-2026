@@ -170,7 +170,7 @@ class Table:
 
 
     def update_tail_record(self, base_rid: int, update_cols: dict[int, int]):
-        
+        '''
         if base_rid not in self.page_directory:
             raise KeyError("record not found")
         if base_rid in self.deleted:
@@ -230,7 +230,70 @@ class Table:
             curr_vals[col_ids] = val
 
         return tail_rid
-        
+        '''
+        if base_rid not in self.page_directory:
+            raise KeyError("record not found")
+        if base_rid in self.deleted:
+            raise KeyError("record has been deleted")
+    
+        # Remove primary key if it somehow got included
+        if self.key in update_cols:
+            update_cols = {k: v for k, v in update_cols.items() if k != self.key}
+    
+        # If nothing left to update after removing primary key
+        if not update_cols:
+            return base_rid
+
+        tail_rid = self.get_RID()
+        last_tail_rid = self.latest_rid(base_rid)
+        if last_tail_rid == base_rid:
+            last_tail_rid = INVALID_RID
+
+        # Get current values from latest version
+        curr_vals = self.latest_cols(base_rid)
+    
+        # Create new values array - start with current values
+        new_vals = [0] * self.num_columns
+        for c in range(self.num_columns):
+            new_vals[c] = curr_vals[c]
+    
+        # Apply updates (but NOT to primary key)
+        for col_id, val in update_cols.items():
+            if col_id != self.key:  # Extra safety check
+                new_vals[col_id] = val
+    
+        # CRITICAL: Ensure primary key always comes from base record
+        new_vals[self.key] = self.read_val(base_rid, 4 + self.key)
+    
+        # Update schema encoding
+        curr_schema = self.base_schema.get(base_rid, 0)
+        new_schema = curr_schema
+        for col_id in update_cols.keys():
+            if col_id != self.key:
+                new_schema |= (1 << col_id)
+
+        curr_time = int(time())
+
+        values = [0] * self.total_columns
+        values[INDIRECTION_COLUMN] = last_tail_rid  
+        values[RID_COLUMN] = tail_rid
+        values[TIMESTAMP_COLUMN] = curr_time
+        values[SCHEMA_ENCODING_COLUMN] = new_schema
+        values[4:] = new_vals
+
+        pages_id, index = self.write_record(is_tail=True, values=values)
+
+        self.base_indirection[base_rid] = tail_rid
+        self.base_schema[base_rid] = new_schema
+
+        # Update indices for changed columns (not primary key)
+        for col_id, new_val in update_cols.items():
+            if col_id == self.key:
+                continue
+            old_val = curr_vals[col_id]
+            self.index.update_entry(col_id, base_rid, old_val, new_val)
+
+        return tail_rid
 
     def read_record(self, base_rid: int, projected_cols: list[int]):
         
