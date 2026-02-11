@@ -123,6 +123,8 @@ class Table:
     def latest_cols(self, base_rid: int):
         rid = self.latest_rid(base_rid)
         cols = [self.read_val(rid, 4 + c) for c in range(self.num_columns)]
+        # CRITICAL: Always get primary key from base record 1 line
+        cols[self.key] = self.read_val(base_rid, 4 + self.key)
         return cols
 
     def get_schemaenc(self, rid: int):
