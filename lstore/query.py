@@ -165,7 +165,10 @@ class Query:
         #Or Locked during something
         if len(rids_list) <= 0:
             return False
-        
+        if columns[self.table.key] is not None and columns[self.table.key] != primary_key:
+            # Trying to change the primary key - not allowed
+            return False
+            
         update_columns =  {i: val for i, val in enumerate(columns) if val is not None and i != self.table.key}
 
         if self.table.key in update_columns:
