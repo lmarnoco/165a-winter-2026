@@ -168,6 +168,9 @@ class Query:
         
         update_columns =  {i: val for i, val in enumerate(columns) if val is not None and i != self.table.key}
 
+        if self.table.key in update_columns:
+            del update_columns[self.table.key]
+        
         if not update_columns:
             return True
         
