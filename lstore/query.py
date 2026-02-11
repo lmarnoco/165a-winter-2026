@@ -168,7 +168,12 @@ class Query:
 
         #Expect 1
         rid = rids_list[0]
-        self.table.update_tail_record(rid, update_columns)
+
+        try:  # put the action in a try except so that if table returns error it doesn't crash? 
+            self.table.update_tail_record(rid, update_columns)
+            return True
+        except Exception:
+            return False
 
  
         return True
