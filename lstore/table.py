@@ -174,6 +174,13 @@ class Table:
         if base_rid in self.deleted:
             raise KeyError("record has been deleted")
 
+        if self.key in update_cols: #double checking
+            update_cols = {k: v for k, v in update_cols.items() if k != self.key}
+    
+        # If nothing left to update after removing primary key
+        if not update_cols:
+            return base_rid  # Return without doing anything
+            
         tail_rid = self.get_RID()
         last_tail_rid = self.base_indirection.get(base_rid, INVALID_RID)
         if last_tail_rid == INVALID_RID:
