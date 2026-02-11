@@ -232,7 +232,7 @@ class Table:
 
         key_val = self.read_val(rid, 4 + self.key)
 
-        return Record(rid, key_val, cols)
+        return Record(base_rid, key_val, cols) # need base_rid returned for update? 
         
 
     def delete(self, base_rid: int):
