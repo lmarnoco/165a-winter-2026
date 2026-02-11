@@ -155,6 +155,8 @@ class Table:
 
         self.base_indirection[base_rid] = INVALID_RID
         self.base_schema[base_rid] = 0  #not sure how to handle this 
+
+        self.index.add_entry(self.key, base_rid, key_val)
         
         for c in range(self.num_columns):
             self.index.add_entry(c, base_rid, values[4 + c])
