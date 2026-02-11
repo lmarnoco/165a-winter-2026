@@ -159,6 +159,8 @@ class Table:
         self.index.add_entry(self.key, base_rid, key_val)
         
         for c in range(self.num_columns):
+            if c == self.key: # skip since self.key has already been inserted above
+                continue
             self.index.add_entry(c, base_rid, values[4 + c])
 
         return base_rid
