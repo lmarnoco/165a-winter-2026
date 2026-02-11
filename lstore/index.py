@@ -11,7 +11,11 @@ class Index:
         #init table
         self.table = table
         #create index for primary key
-        if table.key is not None:
+        #if table.key is not None:
+        #    self.create_index(table.key)
+
+        # fix where we need to create index for all columns? instead of just the primary key 
+        for i in range(table.num_columns):
             self.create_index(table.key)
 
     """
