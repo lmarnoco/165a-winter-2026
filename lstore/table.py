@@ -193,7 +193,11 @@ class Table:
         for col_ids, val in update_cols.items():
             #if val is not None: #Delete
                 new_vals[col_ids] = val
-        
+
+        # CRITICAL: Ensure primary key is NEVER modified in tail record 2 lines
+        base_key_val = self.read_val(base_rid, 4 + self.key)
+        new_vals[self.key] = base_key_val
+
         curr_schema = self.base_schema.get(base_rid, 0)
         new_schema = curr_schema
         for col_ids, val in update_cols.items(): #Change
@@ -238,7 +242,10 @@ class Table:
         cols = [None] * self.num_columns
         for c in range(self.num_columns):
             if projected_cols[c] == 1: 
-                cols[c] = self.read_val(rid, 4 + c)
+                if c == self.key: #added
+                    cols[c] = self.read_val(base_rid, 4 + c) #added
+                else: #added
+                    cols[c] = self.read_val(rid, 4 + c)
 
         key_val = self.read_val(rid, 4 + self.key)
 
