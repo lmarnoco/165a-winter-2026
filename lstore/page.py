@@ -23,3 +23,16 @@ class Page:
             raise IndexError(f"Index {index} out of range")
         offset = index*8
         return int.from_bytes(self.data[offset:offset+8], byteorder='little', signed=True)
+
+    def merge_write(self, index, value):
+        if index < 0 or index >= self.num_records:
+            raise IndexError("index value out of range")
+       
+        offset = index * 8
+        self.data[offset:offset+8] = value.to_bytes(8, byteorder='little', signed=True)
+    
+    def merge_clone(self):
+        p = Page()
+        p.num_records = self.num_records
+        p.data[:] = self.data
+        return p
