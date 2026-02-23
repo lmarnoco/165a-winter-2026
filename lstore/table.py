@@ -9,6 +9,64 @@ SCHEMA_ENCODING_COLUMN = 3
 
 INVALID_RID = 0
 
+MAX_BASE_PAGES_PER_RANGE = 16
+
+class PageRange:
+    def __init__(self, num_columns):
+        self.num_columns = num_columns
+        self.total_columns = 4 + num_columns
+        self.base_pages: list[list[Page]] = []   # list of pagesets
+        self.tail_pages: list[list[Page]] = []   # list of pagesets
+        self.tps = 0  # Tail Page Sequence Number
+
+        self._add_base_pageset()
+        self._add_tail_pageset()
+
+    def _add_base_pageset(self):
+        self.base_pages.append([Page() for _ in range(self.total_columns)])
+
+    def _add_tail_pageset(self):
+        self.tail_pages.append([Page() for _ in range(self.total_columns)])
+
+    def has_base_capacity(self):
+        if len(self.base_pages) < MAX_BASE_PAGES_PER_RANGE:
+            return True  
+        return self.base_pages[-1][0].has_capacity()  # last pageset has room
+
+    def base_full(self):
+        return (len(self.base_pages) >= MAX_BASE_PAGES_PER_RANGE and 
+                not self.base_pages[-1][0].has_capacity())
+
+    def tail_capacity(self):
+        return self.tail_pages[-1][0].has_capacity()
+
+    def write_base(self, values: list[int]):
+        if not self.base_pages[-1][0].has_capacity():
+            if len(self.base_pages) >= MAX_BASE_PAGES_PER_RANGE:
+                raise RuntimeError("Page range full")
+            self._add_base_pageset()
+        
+        pageset_id = len(self.base_pages) - 1
+        pageset = self.base_pages[pageset_id]
+        slot = pageset[0].num_records
+        for col_id, val in enumerate(values):
+            pageset[col_id].write(int(val))
+        return pageset_id, slot
+
+    def write_tail(self, values: list[int]):
+        if not self.tail_capacity():
+            self._add_tail_pageset()
+        
+        pageset_id = len(self.tail_pages) - 1
+        pageset = self.tail_pages[pageset_id]
+        slot = pageset[0].num_records
+        for col_id, val in enumerate(values):
+            pageset[col_id].write(int(val))
+        return pageset_id, slot
+
+    def read(self, is_tail: bool, pageset_id: int, slot: int, col_id: int):
+        pages = self.tail_pages if is_tail else self.base_pages
+        return pages[pageset_id][col_id].read(slot)
 
 class Record:
 
@@ -28,23 +86,15 @@ class Table:
         self.name = name
         self.key = key
         self.num_columns = num_columns
-        self.page_directory: dict[int, tuple[bool, int, int]] = {}
+        self.page_directory: dict[int, tuple[int, bool, int, int]] = {}
         self.index = Index(self)
-        self.merge_threshold_pages = 50  # The threshold to trigger a merge
-        
+        self.page_ranges: list[PageRange] = []
         self.total_columns = 4 + num_columns
-
-        self.base_pages: list[list[Page]] = []
-        self.tail_pages: list[list[Page]] = []
-
         self.base_indirection: dict[int, int] = {}
         self.base_schema: dict[int, int] = {}
         self.deleted: set[int] = set()
-
-        self.next_rid = 1
-
-        self.new_pages(is_tail = False)
-        self.new_pages(is_tail = True)
+        self.next_rid = 1                          
+        self.page_ranges.append(PageRange(num_columns))
 
     # New pages and capacity
 
@@ -69,7 +119,12 @@ class Table:
 
 
     # RID helpers 
+    def _current_range(self) -> PageRange:
+        if self.page_ranges[-1].base_full():
+            self.page_ranges.append(PageRange(self.num_columns))
+        return self.page_ranges[-1]
 
+    
     def get_RID(self):
         rid = self.next_rid
         self.next_rid += 1
@@ -80,37 +135,27 @@ class Table:
 
     def write_record(self, is_tail: bool, values: list[int]):
 
-        if len(values) != self.total_columns:
-            raise ValueError("values length does not match columns")
+        range_id = len(self.page_ranges) - 1
+        pr = self.page_ranges[range_id]
 
         if is_tail:
-            if not self.tail_capacity():
-                self.new_pages(is_tail = True)
-            pages = self.tail_pages
-        else: 
-            if not self.base_capacity():
-                self.new_pages(is_tail = False) 
-            pages = self.base_pages
-        
-        pages_id = len(pages) - 1
-        pageset = pages[pages_id]
-        index = pageset[0].num_records
-
-        for col_id, val in enumerate(values):
-            temp = pageset[col_id].write(int(val))
-            if not temp: 
-                raise RuntimeError("page has no capacity")
+            pageset_id, slot = pr.write_tail(values)
+        else:
+            # check if current range is full, open new one
+            if pr.base_full():
+                self.page_ranges.append(PageRange(self.num_columns))
+                range_id = len(self.page_ranges) - 1
+                pr = self.page_ranges[range_id]
+            pageset_id, slot = pr.write_base(values)
 
         rid = values[RID_COLUMN]
-        self.page_directory[rid] = (is_tail, pages_id, index)
+        self.page_directory[rid] = (range_id, is_tail, pageset_id, slot)
+        return pageset_id, slot
 
-        return pages_id, index
 
     def read_val(self, rid: int, col_id: int):
-        is_tail, pages_id, index = self.page_directory[rid]
-        pageset = (self.tail_pages if is_tail else self.base_pages)[pages_id]
-
-        return pageset[col_id].read(index)
+        range_id, is_tail, pageset_id, slot = self.page_directory[rid]
+        return self.page_ranges[range_id].read(is_tail, pageset_id, slot, col_id)
 
     # metada and stuff 
 
