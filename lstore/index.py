@@ -2,6 +2,9 @@
 A data strucutre holding indices for various columns of a table. Key column should be indexd by default, other columns can be indexed through this object. Indices are usually B-Trees, but other data structures can be used as well.
 """
 
+import os
+import pickle
+
 class Index:
 
     def __init__(self, table):
@@ -11,12 +14,12 @@ class Index:
         #init table
         self.table = table
         #create index for primary key
-        #if table.key is not None:
-        #    self.create_index(table.key)
+        if table.key is not None:
+           self.create_index(table.key)
 
-        # fix where we need to create index for all columns? instead of just the primary key 
-        for i in range(table.num_columns):
-            self.create_index(table.key)
+        # fix where we need to create index for all columns? instead of just the primary key -> EDIT FOR M2: secondary indexes created by the create_index method so I think we won't need this
+        #for i in range(table.num_columns):
+            #self.create_index(table.key)
 
     """
     # returns the location of all records with the given value on column "column"
@@ -30,7 +33,9 @@ class Index:
 
         rids = self.indices[column].get(value, set())
 
-        return list(rids)
+        # Filter out deleted records (using the logic you added)
+        valid_rids = [rid for rid in rids if rid not in self.table.deleted]
+        return list(valid_rids)
 
     """
     # Returns the RIDs of all records with values in column "column" between "begin" and "end"
@@ -42,6 +47,7 @@ class Index:
 
         rids = []
         #hashmap because its in-place
+        #Milestone 2 -> Hashmap stil valid, but needs to be altered in order to account for keys other than the primary one.
         index_map = self.indices[column]
         
         #iterate over all keys in index & check range
@@ -61,6 +67,10 @@ class Index:
     def create_index(self, column_number):
         if self.indices[column_number] is None:
             self.indices[column_number] = {}
+
+    #what function to call to iterate over existing records? -> need this from table.py
+
+    
 
     """
     # optional: Drop index of specific column
@@ -83,6 +93,9 @@ class Index:
         if value in self.indices[column_number]:
             #Check if the RID is missing
             self.indices[column_number][value].discard(rid)
+            #Optimization: If the set is empty, delete the key entirely to save memory -> should help with efficiency
+            if not self.indices[column_number][value]:
+                del self.indices[column_number][value]
 
     def update_entry(self, column_number, rid, old_value, new_value):
        #If value didn't actually change -> nothing
@@ -92,3 +105,20 @@ class Index:
         self.remove_entry(column_number, rid, old_value)
         #Add RID to new value
         self.add_entry(column_number, rid, new_value)
+
+#Milestone 2 Additions
+#----------------------
+    def save_to_disk(self, directory_path):
+        # saves the index data to disk when Database.close() is called
+        file_path = os.path.join(directory_path, f"{self.table.name}_index.pkl")
+        with open(file_path, 'wb') as file:
+            pickle.dump(self.indices, file)
+
+    def load_from_disk(self, directory_path):
+        # loads the index data from disk when Database.open() is called
+        file_path = os.path.join(directory_path, f"{self.table.name}_index.pkl")
+        if os.path.exists(file_path):
+            with open(file_path, 'rb') as file:
+                self.indices = pickle.load(file)
+            return True
+        return False
