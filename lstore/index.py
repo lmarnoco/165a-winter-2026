@@ -65,9 +65,27 @@ class Index:
     """
 
     def create_index(self, column_number):
+        # Initialize the index dictionary if it doesn't exist
         if self.indices[column_number] is None:
             self.indices[column_number] = {}
-
+            
+        # Iterate through all records currently in the table to populate the index
+        # We only index Base RIDs as they represent the logical record
+        for rid in self.table.page_directory:
+            # Skip records that are marked as deleted
+            if rid in self.table.deleted:
+                continue
+                
+            # We only care about base records (tail records are part of base record history)
+            # In page_directory, index 1 of tuple is 'is_tail'
+            is_tail = self.table.page_directory[rid][1]
+            if not is_tail:
+                # Retrieve the latest values to ensure index accuracy
+                latest_values = self.table.latest_cols(rid)
+                column_value = latest_values[column_number]
+                
+                # Add the entry to the newly created index
+                self.add_entry(column_number, rid, column_value)
     #what function to call to iterate over existing records? -> need this from table.py
 
     
