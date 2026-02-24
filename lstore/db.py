@@ -21,11 +21,9 @@ class Database():
     """
     def __init__(self):
 
-        # Initialize a dictionary of tables (self.tables) in the database object.
-        self.tables = {} 
-        
-        # Set path for directory of database.
-        self.path = None
+        self.tables: dict[str, Table] = {}
+        self.path: str = None
+        self.bufferpool: BufferPool = None
 
     
     def open(self, path):
@@ -34,14 +32,16 @@ class Database():
         
         :param path: string representing path for directory of database
         """
-        #self.path = path
+        self.path = path
+        if not os.path.isdir(self.path):
+            os.makedirs(self.path)
+        self.bufferpool = BufferPool(DEFAULT_BUFFERPOOL_CAPACITY, self.path)
 
-        # Check if path is a directory
-        # If not, make it a directory
-        # dir = os.path.isdir(self.path)
-        # if not dir:
-        #    os.mkdir(self.path)
-        pass
+        # Reload table schemas if they exist
+        meta_path = os.path.join(self.path, "tables.meta")
+        if os.path.exists(meta_path):
+            self._load_tables_meta(meta_path)
+
 
         
 
@@ -50,8 +50,11 @@ class Database():
         Close the database
         Later need to implement save function for tables and write to disk.
         """
+        if self.bufferpool:
+            self.bufferpool.flush_all()
+        if self.path:
+            self._save_tables_meta()
         
-
     
     def create_table(self, name, num_columns, key_index):
 
@@ -69,6 +72,8 @@ class Database():
         # Create new table object with passed parameters
         table = Table(name, num_columns, key_index)
 
+        table.bufferpool = self.bufferpool
+        
         # Assign the table object to the table name in self.tables dictionary
         self.tables[name] = table
 
@@ -103,3 +108,20 @@ class Database():
             raise TypeError("Table does not exist")
         
         return self.tables[name]
+
+    def _save_tables_meta(self):
+        meta_path = os.path.join(self.path, "tables.meta")
+        with open(meta_path, 'w') as f:
+            for name, table in self.tables.items():
+                f.write(f"{name},{table.num_columns},{table.key}\n")
+
+    def _load_tables_meta(self, meta_path: str):
+        with open(meta_path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                name, num_columns, key = line.split(',')
+                table = Table(name, int(num_columns), int(key))
+                table.bufferpool = self.bufferpool
+                self.tables[name] = table
