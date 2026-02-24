@@ -67,7 +67,21 @@ class Query:
     """
     def select(self, search_key, search_key_index, projected_columns_index):
         
-        rids_list = self.table.index.locate(search_key_index, search_key)
+        if self.table.index.indices[search_key_index] is not None:
+            rids_list = self.table.index.locate(search_key_index, search_key)
+        else:
+            rids_list = []
+            for rid, meta in self.table.page_directory.items():
+                is_tail = meta[1]
+                if is_tail or rid in self.table.deleted:
+                    continue
+
+                val = self.table.read_val(rid, 4 + search_key_index)
+                if val == search_key:
+                    rids_list.append(rid)
+                    
+        if not rids_list:
+            return []
 
         #Check if None Maybe? (Will add if need be) --> added this to see if it helps
 
@@ -78,9 +92,9 @@ class Query:
                 continue
             seen_list.add(rid)
 
-            temp = result.append(self.table.read_record(rid, projected_columns_index))
-            if temp is not None:
-                result.append(temp)
+            record = self.table.read_record(rid, projected_columns_index)
+            if record is not None:
+                result.append(record)
         
         return result
     
@@ -98,7 +112,21 @@ class Query:
     def select_version(self, search_key, search_key_index, projected_columns_index, relative_version):
 
         #Gets latest RIDs at location of Desired Version
-        rids_list = self.table.index.locate(search_key_index, search_key)
+        if self.table.index.indices[search_key_index] is not None:
+            rids_list = self.table.index.locate(search_key_index, search_key)
+        else:
+            rids_list = []
+            for rid, meta in self.table.page_directory.items():
+                is_tail = meta[1]
+                if is_tail or rid in self.table.deleted:
+                    continue
+
+                val = self.table.read_val(rid, 4 + search_key_index)
+                if val == search_key:
+                    rids_list.append(rid)
+                    
+        if not rids_list:
+            return []
 
         result = []
 
@@ -160,24 +188,22 @@ class Query:
     """
     def update(self, primary_key, *columns):
 
+        if columns[self.table.key] is not None and columns[self.table.key] != primary_key:
+            # Trying to change the primary key - not allowed
+            return False
+        
+
         rids_list = self.table.index.locate(self.table.key, primary_key)
 
         #Or Locked during something
         if len(rids_list) <= 0:
             return False
-        if columns[self.table.key] is not None and columns[self.table.key] != primary_key:
-            # Trying to change the primary key - not allowed
-            return False
-            
+
         update_columns =  {i: val for i, val in enumerate(columns) if val is not None and i != self.table.key}
 
-        if self.table.key in update_columns:
-            del update_columns[self.table.key]
-        
         if not update_columns:
             return True
         
-
         #Expect 1
         rid = rids_list[0]
 
@@ -188,7 +214,6 @@ class Query:
             return False
 
  
-        return True
 
     
     """
