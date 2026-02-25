@@ -1,3 +1,5 @@
+from lstore.bufferpool import BufferPool
+from lstore.bufferpool import DEFAULT_CAPACITY as DEFAULT_BUFFERPOOL_CAPACITY
 from lstore.table import Table
 import os # use path, mkdir, isdir
 
@@ -41,6 +43,9 @@ class Database():
         meta_path = os.path.join(self.path, "tables.meta")
         if os.path.exists(meta_path):
             self._load_tables_meta(meta_path)
+        
+        for table in self.tables.values():
+            table.start_merge_thread()
 
 
         
@@ -54,6 +59,9 @@ class Database():
             self.bufferpool.flush_all()
         if self.path:
             self._save_tables_meta()
+        
+        for table in self.tables.values():
+            table.stop_merge_thread()
         
     
     def create_table(self, name, num_columns, key_index):
