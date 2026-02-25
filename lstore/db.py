@@ -1,8 +1,6 @@
 from lstore.table import Table
 import os # use path, mkdir, isdir
 
-
-
 class Database():
     """
     Handles high-level operations such as starting and shutting down the database instance and 
@@ -23,7 +21,7 @@ class Database():
 
         self.tables: dict[str, Table] = {}
         self.path: str = None
-        self.bufferpool: BufferPool = None
+        self.bufferpool = None  # reserved for future use
 
     
     def open(self, path):
@@ -35,7 +33,6 @@ class Database():
         self.path = path
         if not os.path.isdir(self.path):
             os.makedirs(self.path)
-        self.bufferpool = BufferPool(DEFAULT_BUFFERPOOL_CAPACITY, self.path)
 
         # Reload table schemas if they exist
         meta_path = os.path.join(self.path, "tables.meta")
@@ -50,9 +47,14 @@ class Database():
         Close the database
         Later need to implement save function for tables and write to disk.
         """
-        if self.bufferpool:
-            self.bufferpool.flush_all()
+        # Stop background merge threads before writing to avoid races
+        for table in self.tables.values():
+            table.stop_merge_thread()
+
+        # Persist each table's pages + metadata
         if self.path:
+            for table in self.tables.values():
+                table.save_to_disk(self.path)
             self._save_tables_meta()
         
     
@@ -91,6 +93,9 @@ class Database():
         if name not in self.tables:
             raise TypeError("Table does not exist") 
         
+        # Stop the background merge thread cleanly before dropping
+        self.tables[name].stop_merge_thread()
+
         #remove the table from self.tables dictionary
         del self.tables[name]
         print(f"Table {name} has been dropped")
@@ -126,4 +131,18 @@ class Database():
                 name, num_columns, key = line.split(',')
                 table = Table(name, int(num_columns), int(key))
                 table.bufferpool = self.bufferpool
+                table.load_from_disk(self.path)      # restore pages + metadata
+                self._rebuild_indexes(table)          # indexes are not persisted; rebuild from data
                 self.tables[name] = table
+
+    @staticmethod
+    def _rebuild_indexes(table: Table):
+        """Re-populate in-memory indexes from stored records after a restart."""
+        for base_rid, (range_id, is_tail, pageset_id, slot) in table.page_directory.items():
+            if is_tail:
+                continue
+            if base_rid in table.deleted:
+                continue
+            latest_cols = table.latest_cols(base_rid)
+            for c in range(table.num_columns):
+                table.index.add_entry(c, base_rid, latest_cols[c])

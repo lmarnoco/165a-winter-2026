@@ -14,12 +14,12 @@ class Index:
         #init table
         self.table = table
         #create index for primary key
-        if table.key is not None:
-           self.create_index(table.key)
+        #if table.key is not None:
+           #self.create_index(table.key)
 
         # fix where we need to create index for all columns? instead of just the primary key -> EDIT FOR M2: secondary indexes created by the create_index method so I think we won't need this
-        #for i in range(table.num_columns):
-            #self.create_index(table.key)
+        for i in range(table.num_columns):
+            self.create_index(i)
 
     """
     # returns the location of all records with the given value on column "column"

@@ -4,6 +4,8 @@ from time import time
 
 import threading
 import queue
+import os
+import struct
 
 INDIRECTION_COLUMN = 0
 RID_COLUMN = 1
@@ -111,7 +113,219 @@ class Table:
         self.stop_merge = threading.Event()
         self.merge_thread = None
         self.merge_constant = 32 # ?? just how often it merges... wasn't sure what to put here 
+        self.bufferpool = None  # injected by Database
         self.start_merge_thread()
+
+
+    def save_to_disk(self, db_path: str):
+    
+        table_dir = os.path.join(db_path, self.name)
+        os.makedirs(table_dir, exist_ok=True)
+
+        self._save_pages(table_dir)
+        self._save_metadata(table_dir)
+
+    def load_from_disk(self, db_path: str):
+       
+        table_dir = os.path.join(db_path, self.name)
+        if not os.path.isdir(table_dir):
+            return  # brand-new table, nothing to load
+
+        self._load_pages(table_dir)
+        self._load_metadata(table_dir)
+
+    # ---- page I/O --------------------------------------------------------
+
+    def _save_pages(self, table_dir: str):
+       
+        for range_id, pr in enumerate(self.page_ranges):
+            for pageset_id, pageset in enumerate(pr.base_pages):
+                for col_id, page in enumerate(pageset):
+                    path = self._page_path(table_dir, range_id, False, pageset_id, col_id)
+                    self._write_page(path, page)
+
+            for pageset_id, pageset in enumerate(pr.tail_pages):
+                for col_id, page in enumerate(pageset):
+                    path = self._page_path(table_dir, range_id, True, pageset_id, col_id)
+                    self._write_page(path, page)
+
+    def _load_pages(self, table_dir: str):
+        if not os.path.isdir(table_dir):
+            return
+
+        # Discover the set of (range_id, is_tail, pageset_id) present
+        base_shape: dict[int, int] = {}  # range_id -> max pageset_id seen
+        tail_shape: dict[int, int] = {}
+        max_range = -1
+
+        for fname in os.listdir(table_dir):
+            if not fname.endswith('.pg'):
+                continue
+            # filename: <range_id>_<base|tail>_<pageset_id>_<col_id>.pg
+            parts = fname[:-3].split('_')
+            if len(parts) != 4:
+                continue
+            try:
+                r, side, ps, c = int(parts[0]), parts[1], int(parts[2]), int(parts[3])
+            except ValueError:
+                continue
+            max_range = max(max_range, r)
+            if side == 'base':
+                base_shape[r] = max(base_shape.get(r, -1), ps)
+            else:
+                tail_shape[r] = max(tail_shape.get(r, -1), ps)
+
+        if max_range < 0:
+            return  # no page files found
+
+        # Build empty PageRange objects with the right number of pagesets
+        self.page_ranges = []
+        for r in range(max_range + 1):
+            pr = PageRange.__new__(PageRange)
+            pr.num_columns = self.num_columns
+            pr.total_columns = self.total_columns
+            pr.merge_queued = False
+            pr.merge_inprogess = False
+            pr.updates_postmerge = 0
+            pr.base_tps = []
+            pr.base_pages = []
+            pr.tail_pages = []
+
+            num_base_ps = base_shape.get(r, -1) + 1
+            for _ in range(num_base_ps):
+                pr.base_pages.append([Page() for _ in range(self.total_columns)])
+                pr.base_tps.append(INVALID_RID)
+
+            num_tail_ps = tail_shape.get(r, -1) + 1
+            for _ in range(num_tail_ps):
+                pr.tail_pages.append([Page() for _ in range(self.total_columns)])
+
+            self.page_ranges.append(pr)
+
+        # Read every page file into the right slot
+        for fname in os.listdir(table_dir):
+            if not fname.endswith('.pg'):
+                continue
+            parts = fname[:-3].split('_')
+            if len(parts) != 4:
+                continue
+            try:
+                r, side, ps, c = int(parts[0]), parts[1], int(parts[2]), int(parts[3])
+            except ValueError:
+                continue
+            path = os.path.join(table_dir, fname)
+            page = self._read_page(path)
+            pr = self.page_ranges[r]
+            if side == 'base':
+                pr.base_pages[ps][c] = page
+            else:
+                pr.tail_pages[ps][c] = page
+
+    @staticmethod
+    def _page_path(table_dir: str, range_id: int, is_tail: bool,
+                   pageset_id: int, col_id: int) -> str:
+        side = 'tail' if is_tail else 'base'
+        return os.path.join(table_dir, f"{range_id}_{side}_{pageset_id}_{col_id}.pg")
+
+    @staticmethod
+    def _write_page(path: str, page: Page):
+        with open(path, 'wb') as f:
+            f.write(struct.pack('<q', page.num_records))
+            f.write(bytes(page.data))
+
+    @staticmethod
+    def _read_page(path: str) -> Page:
+        page = Page()
+        with open(path, 'rb') as f:
+            page.num_records = struct.unpack('<q', f.read(8))[0]
+            page.data = bytearray(f.read(4096))
+        return page
+
+
+
+    # ---- metadata I/O ----------------------------------------------------
+
+    def _save_metadata(self, table_dir: str):
+        path = os.path.join(table_dir, 'table.meta')
+        with open(path, 'wb') as f:
+            # next_rid
+            f.write(struct.pack('<q', self.next_rid))
+
+            # page_directory  rid -> (range_id, is_tail, pageset_id, slot)
+            f.write(struct.pack('<q', len(self.page_directory)))
+            for rid, (range_id, is_tail, pageset_id, slot) in self.page_directory.items():
+                f.write(struct.pack('<qqqqq', rid, range_id,
+                                    1 if is_tail else 0, pageset_id, slot))
+
+            # base_indirection  rid -> tail_rid
+            f.write(struct.pack('<q', len(self.base_indirection)))
+            for rid, tail_rid in self.base_indirection.items():
+                f.write(struct.pack('<qq', rid, tail_rid))
+
+            # base_schema  rid -> schema_int
+            f.write(struct.pack('<q', len(self.base_schema)))
+            for rid, schema in self.base_schema.items():
+                f.write(struct.pack('<qq', rid, schema))
+
+            # deleted set
+            f.write(struct.pack('<q', len(self.deleted)))
+            for rid in self.deleted:
+                f.write(struct.pack('<q', rid))
+
+            # tailtobase_merge  tail_rid -> base_rid
+            f.write(struct.pack('<q', len(self.tailtobase_merge)))
+            for tail_rid, base_rid in self.tailtobase_merge.items():
+                f.write(struct.pack('<qq', tail_rid, base_rid))
+
+            # base_tps per page range
+            f.write(struct.pack('<q', len(self.page_ranges)))
+            for pr in self.page_ranges:
+                f.write(struct.pack('<q', len(pr.base_tps)))
+                for tps in pr.base_tps:
+                    f.write(struct.pack('<q', tps))
+
+    def _load_metadata(self, table_dir: str):
+        path = os.path.join(table_dir, 'table.meta')
+        if not os.path.exists(path):
+            return
+
+        with open(path, 'rb') as f:
+            def rd(fmt):
+                return struct.unpack(fmt, f.read(struct.calcsize(fmt)))
+
+            self.next_rid = rd('<q')[0]
+
+            n = rd('<q')[0]
+            for _ in range(n):
+                rid, range_id, is_tail_int, pageset_id, slot = rd('<qqqqq')
+                self.page_directory[rid] = (range_id, bool(is_tail_int), pageset_id, slot)
+
+            n = rd('<q')[0]
+            for _ in range(n):
+                rid, tail_rid = rd('<qq')
+                self.base_indirection[rid] = tail_rid
+
+            n = rd('<q')[0]
+            for _ in range(n):
+                rid, schema = rd('<qq')
+                self.base_schema[rid] = schema
+
+            n = rd('<q')[0]
+            for _ in range(n):
+                self.deleted.add(rd('<q')[0])
+
+            n = rd('<q')[0]
+            for _ in range(n):
+                tail_rid, base_rid = rd('<qq')
+                self.tailtobase_merge[tail_rid] = base_rid
+
+            # restore base_tps into the already-loaded page_ranges
+            num_ranges = rd('<q')[0]
+            for r in range(num_ranges):
+                num_tps = rd('<q')[0]
+                tps_list = [rd('<q')[0] for _ in range(num_tps)]
+                if r < len(self.page_ranges):
+                    self.page_ranges[r].base_tps = tps_list
 
 
     # RID helpers 
