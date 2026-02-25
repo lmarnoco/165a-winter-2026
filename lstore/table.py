@@ -111,7 +111,7 @@ class Table:
         self.stop_merge = threading.Event()
         self.merge_thread = None
         self.merge_constant = 32 # ?? just how often it merges... wasn't sure what to put here 
-        #self.start_merge_thread()
+        self.start_merge_thread()
 
 
     # RID helpers 
@@ -161,13 +161,11 @@ class Table:
                 continue
         
             if temp is None:
-                break
-            # if temp is None:
-            #     try: 
-            #         self.merge_queue.task_done()
-            #     except Exception:
-            #         pass
-            #     continue
+                try: 
+                    self.merge_queue.task_done()
+                except Exception:
+                    pass
+                continue
 
             range_id = temp
 

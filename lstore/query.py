@@ -188,9 +188,6 @@ class Query:
     """
     def update(self, primary_key, *columns):
 
-        if len(columns) < self.table.num_columns:
-            return False
-        
         if columns[self.table.key] is not None and columns[self.table.key] != primary_key:
             # Trying to change the primary key - not allowed
             return False
