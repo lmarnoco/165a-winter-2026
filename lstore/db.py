@@ -95,6 +95,8 @@ class Database():
         del self.tables[name]
         print(f"Table {name} has been dropped")
 
+        # SAEE - NEED TO ALSO STOP BACKGROUNG MERGE THREAD HERE IF ITS RUNNING 
+
     
    
     def get_table(self, name):
