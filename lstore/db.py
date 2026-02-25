@@ -50,6 +50,8 @@ class Database():
         Close the database
         Later need to implement save function for tables and write to disk.
         """
+
+        # SAEE - NEED TO ALSO STOP BACKGROUNG MERGE THREAD HERE IF ITS RUNNING 
         
 
     
@@ -89,6 +91,8 @@ class Database():
         #remove the table from self.tables dictionary
         del self.tables[name]
         print(f"Table {name} has been dropped")
+
+        # SAEE - NEED TO ALSO STOP BACKGROUNG MERGE THREAD HERE IF ITS RUNNING 
 
     
    

@@ -2,6 +2,9 @@ from lstore.index import Index
 from lstore.page import Page
 from time import time
 
+import threading
+import queue
+
 INDIRECTION_COLUMN = 0
 RID_COLUMN = 1
 TIMESTAMP_COLUMN = 2
@@ -17,17 +20,22 @@ class PageRange:
         self.total_columns = 4 + num_columns
         self.base_pages: list[list[Page]] = []   # list of pagesets
         self.tail_pages: list[list[Page]] = []   # list of pagesets
-        self.tps = 0  # Tail Page Sequence Number
+        self.base_tps: list[int] = []  # Tail Page Sequence Number --> list for TPS per base page set
+        self.merge_queued = False;
+        self.merge_inprogess = False;
+        self.updates_postmerge = 0;
 
         self._add_base_pageset()
         self._add_tail_pageset()
 
     def _add_base_pageset(self):
         self.base_pages.append([Page() for _ in range(self.total_columns)])
+        self.base_tps.append(INVALID_RID)
 
     def _add_tail_pageset(self):
         self.tail_pages.append([Page() for _ in range(self.total_columns)])
 
+    # are we using this? take it out? 
     def has_base_capacity(self):
         if len(self.base_pages) < MAX_BASE_PAGES_PER_RANGE:
             return True  
@@ -96,26 +104,14 @@ class Table:
         self.next_rid = 1                          
         self.page_ranges.append(PageRange(num_columns))
 
-    # New pages and capacity
-
-    def new_pages(self, is_tail: bool):
-        pageset = [Page() for _ in range(self.total_columns)]
-        if is_tail:
-            self.tail_pages.append(pageset)
-        else:
-            self.base_pages.append(pageset)
-
-    def base_capacity(self):
-        if not self.base_pages:
-            return False
-        else:
-            return self.base_pages[-1][0].has_capacity()
-
-    def tail_capacity(self):
-        if not self.tail_pages:
-            return False
-        else:
-            return self.tail_pages[-1][0].has_capacity() 
+        # merging stuff
+        self.tailtobase_merge: dict[int, int] = {}    # this is for tail RID to base RID linking 
+        self.table_lock = threading.RLock()
+        self.merge_queue = queue.Queue()
+        self.stop_merge = threading.Event()
+        self.merge_thread = None
+        self.merge_constant = 32 # ?? just how often it merges... wasn't sure what to put here 
+        self.start_merge_thread()
 
 
     # RID helpers 
@@ -130,22 +126,112 @@ class Table:
         self.next_rid += 1
         return rid;
 
+    def get_base_range(self, base_rid):
+        if base_rid not in self.page_directory:
+            raise KeyError(f"{base_rid} not found in the page dir")
+        
+        range_id, is_tail, pageset_id, slot = self.page_directory[base_rid]
+        if is_tail:
+            raise ValueError(f"{base_rid} is wrong. Tail RID found.")
+
+        return range_id
+
+
+    # Merge helpers 
+
+    def start_merge_thread(self):
+        if self.merge_thread is not None and self.merge_thread.is_alive() == True:
+            return
+        
+        self.merge_thread = threading.Thread(target = self.merge_loop, daemon = True)
+        self.merge_thread.start()
+
+    def stop_merge_thread(self):
+        self.stop_merge.set()
+        self.merge_queue.put(None)
+
+        if self.merge_thread is not None:
+            self.merge_thread.join(timeout = 1.0)
+    
+    def merge_loop(self):
+        while not self.stop_merge.is_set():
+            try:
+                temp = self.merge_queue.get(timeout = 1.0)
+            except queue.Empty: 
+                continue
+        
+            if temp is None:
+                try: 
+                    self.merge_queue.task_done()
+                except Exception:
+                    pass
+                continue
+
+            range_id = temp
+
+            try:
+                self.__merge(range_id)
+            except Exception:
+                with self.table_lock:
+                    if 0 <= range_id < len(self.page_ranges):
+                        pr = self.page_ranges[range_id]
+                        pr.merge_inprogess = False
+                        pr.merge_queued = False
+
+            try: 
+                self.merge_queue.task_done()
+            except Exception: 
+                pass 
+
+    def schedule_merge(self, range_id : int):
+        with self.table_lock:
+            pr = self.page_ranges[range_id]
+            pr.updates_postmerge += 1
+
+            if pr.merge_inprogess == True or pr.merge_queued == True:
+                return 
+
+            if pr.updates_postmerge >= self.merge_constant:
+                pr.merge_queued = True;
+                self.merge_queue.put(range_id)
+
+    def latest_read_rid(self, base_rid : int):
+        latest_tail_rid = self.base_indirection.get(base_rid, INVALID_RID)
+        if latest_tail_rid == INVALID_RID:
+            return base_rid
+
+        range_id, is_tail, base_pageset, slot = self.page_directory[base_rid]
+        
+        tps = self.page_ranges[range_id].base_tps[base_pageset]
+
+        if latest_tail_rid <= tps:
+            return base_rid
+        
+        return latest_tail_rid
+        
 
     # records functions
 
-    def write_record(self, is_tail: bool, values: list[int]):
-
-        range_id = len(self.page_ranges) - 1
-        pr = self.page_ranges[range_id]
+    def write_record(self, is_tail: bool, values: list[int], target_range_id: int = None):
 
         if is_tail:
+            if target_range_id is None: 
+                raise ValueError("no target range specified")
+            if not ( 0 <= target_range_id < len(self.page_ranges)):
+                raise IndexError("invalid target range")
+
+            # add record to target tail range corrleated with specific base range
+            range_id = target_range_id
+            pr = self.page_ranges[range_id]
             pageset_id, slot = pr.write_tail(values)
+
         else:
             # check if current range is full, open new one
-            if pr.base_full():
-                self.page_ranges.append(PageRange(self.num_columns))
-                range_id = len(self.page_ranges) - 1
-                pr = self.page_ranges[range_id]
+            #if pr.base_full():
+            #    self.page_ranges.append(PageRange(self.num_columns)) --> already being checked in current_range
+
+            pr = self._current_range()
+            range_id = len(self.page_ranges) - 1
             pageset_id, slot = pr.write_base(values)
 
         rid = values[RID_COLUMN]
@@ -166,7 +252,7 @@ class Table:
 
 
     def latest_cols(self, base_rid: int):
-        rid = self.latest_rid(base_rid)
+        rid = self.latest_read_rid(base_rid)
         cols = [self.read_val(rid, 4 + c) for c in range(self.num_columns)]
         return cols
 
@@ -224,6 +310,8 @@ class Table:
         # If nothing left to update after removing primary key
         if not update_cols:
             return base_rid  # Return without doing anything
+
+        base_range_id = self.get_base_range(base_rid)
             
         tail_rid = self.get_RID()
         last_tail_rid = self.base_indirection.get(base_rid, INVALID_RID)
@@ -255,10 +343,15 @@ class Table:
 
         # while not self.tail_capacity():
         #     self.new_pages(is_tail = True) #Delete
-        pages_id, index = self.write_record(is_tail = True, values = values)
+        pages_id, index = self.write_record(is_tail = True, values = values, target_range_id = base_range_id)
 
-        self.base_indirection[base_rid] = tail_rid
-        self.base_schema[base_rid] = new_schema
+        with self.table_lock:
+            self.tailtobase_merge[tail_rid] = base_rid
+
+            self.base_indirection[base_rid] = tail_rid
+            self.base_schema[base_rid] = new_schema
+
+        self.schedule_merge(base_range_id)
 
         for col_ids, val in update_cols.items():
             if col_ids == self.key:
@@ -277,7 +370,7 @@ class Table:
         if base_rid in self.deleted:
             return None
 
-        rid = self.latest_rid(base_rid)
+        rid = self.latest_read_rid(base_rid)
 
         cols = [None] * self.num_columns
         for c in range(self.num_columns):
@@ -308,12 +401,130 @@ class Table:
         return True;    
 
 
-    # merge is milestone 2? 
+    # now adding the actual merge functionality 
+    # - I chose a granularity where the merge is happening at the page range level 
+    # - also deleted records should just be skipped during merge and not physically delted 
 
-    def __merge(self):
+    # merge the lastest values of the record from the tail page so we implemnet in reverse
+    def tail_merge_reverse(self, tail_pagesets):
+        result = []
+
+        for page in range(len(tail_pagesets) - 1, -1, -1):
+            count = tail_pagesets[page][0].num_records
+
+            for slot in range(count - 1, -1, -1):
+                tail_rid = tail_pagesets[page][RID_COLUMN].read(slot)
+                result.append((tail_rid, page, slot))
+
+        return result
+
+
+    def __merge(self, range_id : int):
         print("merge is happening")
-        pass
- 
+
+
+        # part 1 where everythings being copied under lock 
+        with self.table_lock:
+
+            pr = self.page_ranges[range_id]
+            if pr.merge_inprogess:
+                return
+
+            pr.merge_inprogess = True
+            pr.merge_queued = False
+
+            basepages_clone = []
+            for pageset in pr.base_pages:
+                temp = []
+                for page in pageset:
+                    temp.append(page.merge_clone())
+                basepages_clone.append(temp)
+
+            tailpages_clone = []
+            for pageset in pr.tail_pages:
+                temp = []
+                for page in pageset:
+                    temp.append(page.merge_clone())
+                tailpages_clone.append(temp)
+
+            tps_copy = pr.base_tps.copy()
+
+            page_dir_copy = {}
+            for rid, loc in self.page_directory.items():
+                if loc[0] == range_id:
+                    page_dir_copy[rid] = loc
+
+            tailtobase_merge_copy = {}
+            for rid, loc in page_dir_copy.items():
+                loc_range, is_tail, pageset_id, slot = loc
+                if is_tail and rid in self.tailtobase_merge:
+                    tailtobase_merge_copy[rid] = self.tailtobase_merge[rid]
+
+            deleted = set(self.deleted)
+
+
+        # part 2 where the actual merge is happening 
+
+        merged_pages = basepages_clone
+        new_base_tps = tps_copy.copy()
+
+        seen_base_rids = set()
+
+        max_tail = {}
+
+        for tail_rid, tail_pageset, tail_slot in self.tail_merge_reverse(tailpages_clone):
+            
+            if tail_rid not in tailtobase_merge_copy:
+                continue
+
+            base_rid = tailtobase_merge_copy[tail_rid]
+
+            if base_rid in deleted: 
+                continue 
+
+            if base_rid not in page_dir_copy:
+                continue
+
+            base_range, is_tailbase, base_pageset, base_slot = page_dir_copy[base_rid]
+            
+            old_tps = tps_copy[base_pageset]
+
+            prev_max = max_tail.get(base_pageset, old_tps)
+            if tail_rid > prev_max:
+                max_tail[base_pageset] = tail_rid
+
+            if base_rid in seen_base_rids:
+                continue
+            seen_base_rids.add(base_rid)
+
+            for c in range(self.num_columns):
+                val = tailpages_clone[tail_pageset][4 + c].read(tail_slot)
+                merged_pages[base_pageset][4 + c].merge_write(base_slot, val)
+
+            
+        for base_pageset, new_tps in max_tail.items():
+            if new_tps > new_base_tps[base_pageset]:
+                new_base_tps[base_pageset] = new_tps
+
+        
+        # part 3 where we change page dir pointer to new merged pages with lock 
+
+        with self.table_lock:
+            if not (0 <= range_id < len(self.page_ranges)):
+                return
+
+            pr = self.page_ranges[range_id]
+
+            pr.base_pages = merged_pages
+
+            for i in range(len(pr.base_tps)):
+                if i < len(new_base_tps) and new_base_tps[i] > pr.base_tps[i]:
+                    pr.base_tps[i] = new_base_tps[i]
+
+            pr.merge_inprogess = False
+            pr.merge_queued = False
+            pr.updates_postmerge = 0
+
 
     #Iterates through Previous RID until desired
     def get_previous_rid(self, base_rid: int, version: int):
