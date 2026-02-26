@@ -4,7 +4,7 @@ import os
 import struct
 import threading
 
-DEFAULT_CAPACITY = 1024
+DEFAULT_CAPACITY = 32
 
 
 def page_id(table_name: str, range_id: int, is_tail: bool, pageset_id: int, col_id: int) -> str:
@@ -45,6 +45,24 @@ class BufferPool:
             if pid in self.frames:
                 self.frames[pid]['pin'] = max(0, self.frames[pid]['pin'] - 1)
 
+    def install_page(self, pid: str, page: Page, dirty: bool = True):
+        with self._lock:
+            if pid in self.frames:
+                if self.frames[pid]['pin'] > 0:
+                    return False
+                self.frames[pid]['page'] = page
+                self.frames[pid]['dirty'] = self.frames[pid]['dirty'] or dirty
+                self.lru.move_to_end(pid)
+                return True
+
+            if len(self.frames) >= self.capacity:
+                self._evict()
+
+            self.frames[pid] = {'page': page, 'dirty': dirty, 'pin': 0}
+            self.lru[pid] = None
+        
+        return True
+
     def flush_all(self):
         with self._lock:
             for pid, frame in self.frames.items():
@@ -73,9 +91,12 @@ class BufferPool:
     def _filepath(self, pid: str) -> str:
         # pid format: tablename_rangeid_side_pagesetid_colid
         # files live at: db_path/tablename/rangeid_side_pagesetid_colid.pg
-        parts = pid.split('_', 1)  # split on first underscore only
-        table_name = parts[0]
-        rest = parts[1]  # rangeid_side_pagesetid_colid
+        parts = pid.rsplit('_', 4)  # saee - changed to use rsplit and split everything 
+        if len(parts) != 5:
+            raise ValueError(f"page id is invalid. pid: {pid}")
+        
+        table_name, range_id, side, pageset_id, col_id = parts
+        rest = f"{range_id}_{side}_{pageset_id}_{col_id}"
         return os.path.join(self.path, table_name, rest + '.pg')
 
     def _load_from_disk(self, pid: str) -> Page:
