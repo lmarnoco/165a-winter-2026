@@ -2,6 +2,7 @@ from lstore.page import Page
 from collections import OrderedDict
 import os
 import struct
+import threading
 
 DEFAULT_CAPACITY = 1024
 
@@ -17,44 +18,53 @@ class BufferPool:
         self.path = path
         self.frames: dict[str, dict] = {}
         self.lru: OrderedDict = OrderedDict()  # oldest → newest
+        self._lock = threading.Lock()  
 
     def get_page(self, pid: str) -> Page:
-        if pid in self.frames:
-            self.lru.move_to_end(pid)
-            self.frames[pid]['pin'] += 1
-            return self.frames[pid]['page']
+        with self._lock:
+            if pid in self.frames:
+                self.lru.move_to_end(pid)
+                self.frames[pid]['pin'] += 1
+                return self.frames[pid]['page']
 
-        if len(self.frames) >= self.capacity:
-            self._evict()
+            if len(self.frames) >= self.capacity:
+                self._evict()
 
-        page = self._load_from_disk(pid)
-        self.frames[pid] = {'page': page, 'dirty': False, 'pin': 1}
-        self.lru[pid] = None
-        return page
+            page = self._load_from_disk(pid)
+            self.frames[pid] = {'page': page, 'dirty': False, 'pin': 1}
+            self.lru[pid] = None
+            return page
 
     def mark_dirty(self, pid: str):
-        if pid in self.frames:
-            self.frames[pid]['dirty'] = True
+        with self._lock:
+            if pid in self.frames:
+                self.frames[pid]['dirty'] = True
 
     def unpin(self, pid: str):
-        if pid in self.frames:
-            self.frames[pid]['pin'] = max(0, self.frames[pid]['pin'] - 1)
+        with self._lock:
+            if pid in self.frames:
+                self.frames[pid]['pin'] = max(0, self.frames[pid]['pin'] - 1)
 
     def flush_all(self):
-        for pid, frame in self.frames.items():
-            if frame['dirty']:
-                self._write_to_disk(pid, frame['page'])
-                frame['dirty'] = False
-
-
+        with self._lock:
+            for pid, frame in self.frames.items():
+                if frame['dirty']:
+                    self._write_to_disk(pid, frame['page'])
+                    frame['dirty'] = False
 
 
 
     def _evict(self):
-        for pid in self.lru:  # oldest first
+        # first pass: evict clean unpinned pages
+        for pid in self.lru:
+            if self.frames[pid]['pin'] == 0 and not self.frames[pid]['dirty']:
+                del self.frames[pid]
+                del self.lru[pid]
+                return
+        # second pass: evict dirty unpinned pages
+        for pid in self.lru:
             if self.frames[pid]['pin'] == 0:
-                if self.frames[pid]['dirty']:
-                    self._write_to_disk(pid, self.frames[pid]['page'])
+                self._write_to_disk(pid, self.frames[pid]['page'])
                 del self.frames[pid]
                 del self.lru[pid]
                 return
@@ -77,10 +87,13 @@ class BufferPool:
                 raw = f.read(4096)
             page.num_records = struct.unpack('<q', header)[0]
             page.data = bytearray(raw)
+        #else:
+            #print(f"MISSING FROM DISK: {filepath}")
         return page
 
     def _write_to_disk(self, pid: str, page: Page):
         filepath = self._filepath(pid)
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
         with open(filepath, 'wb') as f:
             f.write(struct.pack('<q', page.num_records))
             f.write(page.data)

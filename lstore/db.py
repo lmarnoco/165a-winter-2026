@@ -35,7 +35,7 @@ class Database():
         if not os.path.isdir(self.path):
             os.makedirs(self.path)
 
-        self.bufferpool = BufferPool(capacity=1024, path=path)
+        self.bufferpool = BufferPool(capacity=32, path=path)
 
         # Reload table schemas if they exist
         meta_path = os.path.join(self.path, "tables.meta")

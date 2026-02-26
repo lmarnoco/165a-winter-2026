@@ -32,7 +32,6 @@ class Index:
             return []
 
         rids = self.indices[column].get(value, set())
-
         # Filter out deleted records (using the logic you added)
         valid_rids = [rid for rid in rids if rid not in self.table.deleted]
         return list(valid_rids)
