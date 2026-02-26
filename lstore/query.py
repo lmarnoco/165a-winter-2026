@@ -116,8 +116,12 @@ class Query:
     def select_version(self, search_key, search_key_index, projected_columns_index, relative_version):
         self.table.publish_merge()
 
-        #Gets latest RIDs at location of Desired Version
-        if self.table.index.indices[search_key_index] is not None:
+        if relative_version <= 0: 
+            steps_back = -relative_version 
+        else:
+            steps_back = relative_version
+
+        if search_key_index == self.table.key and self.table.index.indices[search_key_index] is not None:
             rids_list = self.table.index.locate(search_key_index, search_key)
         else:
             rids_list = []
@@ -126,63 +130,48 @@ class Query:
                 if is_tail or rid in self.table.deleted:
                     continue
 
-                latest_val = self.table.latest_cols(rid)[search_key_index]
-                if latest_val == search_key:
-                    rids_list.append(rid)
-                    
-        if not rids_list:
-            return []
+                rids_list.append(rid)
 
         result = []
+        seen = set()
 
         #Iterates through all locations appending to list
         # Saee - I think this loop logic is right? but like Tharun the storage part is missing 
-        for rids in rids_list:
+        # saee again - chnaged this entire logic up again a bit... tests were failing again.. 
+        for base_rid in rids_list:
+            if base_rid in seen:
+                continue
 
-            if relative_version <= 0:
-                steps_back = -relative_version
+            seen.add(base_rid)
+
+            if base_rid in self.table.deleted:
+                continue
+
+            past_rid = self.table.get_previous_rid(base_rid, steps_back)
+
+            if search_key_index == self.table.key:
+                version_val = self.table.read_val(base_rid, 4 + search_key_index)
             else:
-                steps_back = relative_version
-            past_rid = self.table.get_previous_rid(rids, steps_back)
+                version_val = self.table.read_val(past_rid, 4 + search_key_index)
+
+            if version_val != search_key:
+                continue
 
             cols = [None] * self.table.num_columns
             for c in range(self.table.num_columns):
-                current = past_rid
-                while True:
-                    schema = self.table.get_schemaenc(current)
-                    if(schema >> c) & 1 == 1:
-                        cols[c] = self.table.read_val(current, 4 + c)
-                        break
-                    prev = self.table.read_val(current, INDIRECTION_COLUMN)
-                    if prev == INVALID_RID:
-                        cols[c] = self.table.read_val(current, 4 + c)
-                        break
-                    current = prev
+                if projected_columns_index[c] != 1:
+                    continue
 
-            key_val = self.table.read_val(past_rid, 4 + self.table.key)
-            result.append(Record(past_rid, key_val, cols)) # added this from the below logic to the OG loop 
-                
-        #new logic
-        #read the data directly, then loop through it
-        #I think the issue with the old for loop was that it went backwards column by column, but the thing is that table actually stores cumulate updates so we can just use that. the code ends up much simpler, gotta see if it works though
-        """
-        for rids in rids_list:
-            if relative_version <= 0:
-                steps_back = -relative_version
-            else:
-                steps_back = relative_version
-            past_rid = self.table.get_previous_rid(rids, steps_back)
-            cols = [None] * self.table.num_columns
-            
-            for c in range(self.table.num_columns):
-                if projected_columns_index[c] == 1:
+                if c == self.table.key:
+                    cols[c] = self.table.read_val(base_rid, 4 + c)
+                else:
                     cols[c] = self.table.read_val(past_rid, 4 + c)
 
-                key_val = self.table.read_val(past_rid, 4 + self.table.key)
+            key_val = self.table.read_val(base_rid, 4 + self.table.key) 
+            result.append(Record(base_rid, key_val, cols))  # added this from the below logic to the OG loop 
 
-                result.append(Record(past_rid, key_val, cols))
-        """
         return result
+
         
 
     

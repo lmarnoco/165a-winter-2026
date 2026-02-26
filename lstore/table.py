@@ -595,49 +595,57 @@ class Table:
         if base_rid in self.deleted or self.base_indirection.get(base_rid) == DELETED_INDIRECTION:
             raise KeyError("record has been deleted")
 
-        if self.key in update_cols: #double checking
+        if self.key in update_cols:
             update_cols = {k: v for k, v in update_cols.items() if k != self.key}
-    
-        # If nothing left to update after removing primary key
+
         if not update_cols:
-            return base_rid  # Return without doing anything
+            return base_rid
 
         with self.table_lock:
             base_range_id = self.get_base_range(base_rid)
-            
-            tail_rid = self.get_RID()
-            last_tail_rid = self.base_indirection.get(base_rid, INVALID_RID)
-            if last_tail_rid == INVALID_RID:
-                prev_rid = base_rid
-            else:
-                prev_rid = last_tail_rid
 
             curr_vals = self.latest_cols(base_rid)
-            new_vals = curr_vals.copy()     
-            for col_ids, val in update_cols.items():
-            #if val is not None: #Delete
-                new_vals[col_ids] = val
-
             curr_schema = self.base_schema.get(base_rid, 0)
-            new_schema = curr_schema
-            for col_ids, val in update_cols.items(): #Change
-            #if val is not None:
-                new_schema |= (1 << col_ids)
+
+            last_tail_rid = self.base_indirection.get(base_rid, INVALID_RID)
+            prev_rid = last_tail_rid if last_tail_rid != INVALID_RID else base_rid
 
             curr_time = int(time())
 
+            # do the first update for this base record --> also create a copy that has original/base version
+            if last_tail_rid == INVALID_RID:
+                copy_rid = self.get_RID()
+                copy_vals = [0] * self.total_columns
+                copy_vals[INDIRECTION_COLUMN] = base_rid
+                copy_vals[RID_COLUMN] = copy_rid
+                copy_vals[TIMESTAMP_COLUMN] = curr_time
+                copy_vals[SCHEMA_ENCODING_COLUMN] = (1 << self.num_columns) - 1
+                copy_vals[4:] = curr_vals.copy()
+
+                self.write_record(is_tail=True, values=copy_vals, target_range_id=base_range_id)
+                self.tailtobase_merge[copy_rid] = base_rid
+
+                prev_rid = copy_rid
+
+            tail_rid = self.get_RID()
+
+            new_vals = curr_vals.copy()
+            for col_id, val in update_cols.items():
+                new_vals[col_id] = val
+
+            new_schema = curr_schema
+            for col_id in update_cols.keys():
+                new_schema |= (1 << col_id)
+
             values = [0] * self.total_columns
-            values[INDIRECTION_COLUMN] = prev_rid  
+            values[INDIRECTION_COLUMN] = prev_rid
             values[RID_COLUMN] = tail_rid
             values[TIMESTAMP_COLUMN] = curr_time
             values[SCHEMA_ENCODING_COLUMN] = new_schema
             values[4:] = new_vals
 
-            # while not self.tail_capacity():
-            #     self.new_pages(is_tail = True) #Delete
-            pages_id, index = self.write_record(is_tail = True, values = values, target_range_id = base_range_id)
+            self.write_record(is_tail=True, values=values, target_range_id=base_range_id)
 
- 
             self.tailtobase_merge[tail_rid] = base_rid
 
             self.base_indirection[base_rid] = tail_rid
@@ -645,15 +653,15 @@ class Table:
 
         self.schedule_merge(base_range_id)
 
-        for col_ids, val in update_cols.items():
-            if col_ids == self.key:
+        for col_id, val in update_cols.items():
+            if col_id == self.key:
                 continue
-            old_val = curr_vals[col_ids]
-            self.index.update_entry(col_ids, base_rid, old_val, val)
-            curr_vals[col_ids] = val
+            old_val = curr_vals[col_id]
+            self.index.update_entry(col_id, base_rid, old_val, val)
+            curr_vals[col_id] = val
 
         return tail_rid
-        
+
 
     def read_record(self, base_rid: int, projected_cols: list[int]):
         if base_rid not in self.page_directory:
@@ -816,11 +824,25 @@ class Table:
     def get_previous_rid(self, base_rid: int, version: int):
         rid = self.latest_rid(base_rid)
 
+        # if no updates exist
+        if rid == base_rid:
+            return base_rid
+
         for _ in range(version):
             prev_rid = self.read_val(rid, INDIRECTION_COLUMN)
+
             if prev_rid == INVALID_RID:
                 return base_rid
+
+            if prev_rid == base_rid:
+                range_id, is_tail, base_pageset, slot = self.page_directory[base_rid]
+                tps = self.page_ranges[range_id].base_tps[base_pageset]
+                if tps != INVALID_RID:
+                    return rid
+
             rid = prev_rid
+
         return rid
+
     
     
