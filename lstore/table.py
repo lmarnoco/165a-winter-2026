@@ -739,26 +739,26 @@ class Table:
             deleted = set(self.deleted)
 
             # Clone base pages by reading from bufferpool
-            basepages_clone = []
-            for ps_id in range(num_base_pagesets):
-                pageset = []
-                for col_id in range(self.total_columns):
-                    pid = self._pid(range_id, False, ps_id, col_id)
-                    orig = self.bufferpool.get_page(pid)
-                    pageset.append(orig.merge_clone())
-                    self.bufferpool.unpin(pid)
-                basepages_clone.append(pageset)
+        basepages_clone = []
+        for ps_id in range(num_base_pagesets):
+            pageset = []
+            for col_id in range(self.total_columns):
+                pid = self._pid(range_id, False, ps_id, col_id)
+                orig = self.bufferpool.get_page(pid)
+                pageset.append(orig.merge_clone())
+                self.bufferpool.unpin(pid)
+            basepages_clone.append(pageset)
 
-                # Clone tail pages
-            tailpages_clone = []
-            for ps_id in range(num_tail_pagesets):
-                pageset = []
-                for col_id in range(self.total_columns):
-                    pid = self._pid(range_id, True, ps_id, col_id)
-                    orig = self.bufferpool.get_page(pid)
-                    pageset.append(orig.merge_clone())
-                    self.bufferpool.unpin(pid)
-                tailpages_clone.append(pageset)
+            # Clone tail pages
+        tailpages_clone = []
+        for ps_id in range(num_tail_pagesets):
+            pageset = []
+            for col_id in range(self.total_columns):
+                pid = self._pid(range_id, True, ps_id, col_id)
+                orig = self.bufferpool.get_page(pid)
+                pageset.append(orig.merge_clone())
+                self.bufferpool.unpin(pid)
+            tailpages_clone.append(pageset)
 
         # part 2 where the actual merge is happening 
 
