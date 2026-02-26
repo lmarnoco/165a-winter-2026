@@ -20,63 +20,59 @@ class PageRange:
     def __init__(self, num_columns):
         self.num_columns = num_columns
         self.total_columns = 4 + num_columns
-        self.base_pages: list[list[Page]] = []   # list of pagesets
-        self.tail_pages: list[list[Page]] = []   # list of pagesets
-        self.base_tps: list[int] = []  # Tail Page Sequence Number --> list for TPS per base page set
-        self.merge_queued = False;
-        self.merge_inprogess = False;
-        self.updates_postmerge = 0;
+        self.merge_queued = False
+        self.merge_inprogress = False
+        self.updates_postmerge = 0
+
+        # Structure tracking only — no Page objects
+        self.num_base_pagesets = 0
+        self.base_pageset_counts: list[int] = []   # num_records per base pageset
+        self.num_tail_pagesets = 0
+        self.tail_pageset_counts: list[int] = []   # num_records per tail pageset
+        self.base_tps: list[int] = []
 
         self._add_base_pageset()
         self._add_tail_pageset()
 
     def _add_base_pageset(self):
-        self.base_pages.append([Page() for _ in range(self.total_columns)])
+        self.num_base_pagesets += 1
+        self.base_pageset_counts.append(0)
         self.base_tps.append(INVALID_RID)
 
     def _add_tail_pageset(self):
-        self.tail_pages.append([Page() for _ in range(self.total_columns)])
-
-    # are we using this? take it out? 
-    def has_base_capacity(self):
-        if len(self.base_pages) < MAX_BASE_PAGES_PER_RANGE:
-            return True  
-        return self.base_pages[-1][0].has_capacity()  # last pageset has room
+        self.num_tail_pagesets += 1
+        self.tail_pageset_counts.append(0)
 
     def base_full(self):
-        return (len(self.base_pages) >= MAX_BASE_PAGES_PER_RANGE and 
-                not self.base_pages[-1][0].has_capacity())
+        if self.num_base_pagesets < MAX_BASE_PAGES_PER_RANGE:
+            return False
+        return self.base_pageset_counts[-1] >= 512  # 4096/8
+
+    def has_base_capacity(self):
+        return not self.base_full()
 
     def tail_capacity(self):
-        return self.tail_pages[-1][0].has_capacity()
+        return self.tail_pageset_counts[-1] < 512
 
-    def write_base(self, values: list[int]):
-        if not self.base_pages[-1][0].has_capacity():
-            if len(self.base_pages) >= MAX_BASE_PAGES_PER_RANGE:
+    def alloc_base_slot(self):
+        """Allocate a slot in the current base pageset. Returns (pageset_id, slot)."""
+        if self.base_pageset_counts[-1] >= 512:
+            if self.num_base_pagesets >= MAX_BASE_PAGES_PER_RANGE:
                 raise RuntimeError("Page range full")
             self._add_base_pageset()
-        
-        pageset_id = len(self.base_pages) - 1
-        pageset = self.base_pages[pageset_id]
-        slot = pageset[0].num_records
-        for col_id, val in enumerate(values):
-            pageset[col_id].write(int(val))
+        pageset_id = self.num_base_pagesets - 1
+        slot = self.base_pageset_counts[pageset_id]
+        self.base_pageset_counts[pageset_id] += 1
         return pageset_id, slot
 
-    def write_tail(self, values: list[int]):
-        if not self.tail_capacity():
+    def alloc_tail_slot(self):
+        """Allocate a slot in the current tail pageset. Returns (pageset_id, slot)."""
+        if self.tail_pageset_counts[-1] >= 512:
             self._add_tail_pageset()
-        
-        pageset_id = len(self.tail_pages) - 1
-        pageset = self.tail_pages[pageset_id]
-        slot = pageset[0].num_records
-        for col_id, val in enumerate(values):
-            pageset[col_id].write(int(val))
+        pageset_id = self.num_tail_pagesets - 1
+        slot = self.tail_pageset_counts[pageset_id]
+        self.tail_pageset_counts[pageset_id] += 1
         return pageset_id, slot
-
-    def read(self, is_tail: bool, pageset_id: int, slot: int, col_id: int):
-        pages = self.tail_pages if is_tail else self.base_pages
-        return pages[pageset_id][col_id].read(slot)
 
 class Record:
 
@@ -133,35 +129,35 @@ class Table:
 
         self._load_pages(table_dir)
         self._load_metadata(table_dir)
+    
+    def _pid(self, range_id: int, is_tail: bool, pageset_id: int, col_id: int) -> str:
+        side = 'tail' if is_tail else 'base'
+        return f"{self.name}_{range_id}_{side}_{pageset_id}_{col_id}"
 
     # ---- page I/O --------------------------------------------------------
 
     def _save_pages(self, table_dir: str):
-       
-        for range_id, pr in enumerate(self.page_ranges):
-            for pageset_id, pageset in enumerate(pr.base_pages):
-                for col_id, page in enumerate(pageset):
-                    path = self._page_path(table_dir, range_id, False, pageset_id, col_id)
-                    self._write_page(path, page)
-
-            for pageset_id, pageset in enumerate(pr.tail_pages):
-                for col_id, page in enumerate(pageset):
-                    path = self._page_path(table_dir, range_id, True, pageset_id, col_id)
-                    self._write_page(path, page)
+        # Bufferpool writes dirty pages to disk at the bufferpool's path.
+        # Since bufferpool.path == db_path and page files are named
+        # tablename_range_side_pageset_col.pg, they land in the right place.
+        #os.makedirs(table_dir, exist_ok=True)
+        #if self.bufferpool is not None:
+            #self.bufferpool.flush_all()
+        pass
 
     def _load_pages(self, table_dir: str):
         if not os.path.isdir(table_dir):
             return
 
-        # Discover the set of (range_id, is_tail, pageset_id) present
-        base_shape: dict[int, int] = {}  # range_id -> max pageset_id seen
+        base_shape: dict[int, int] = {}
         tail_shape: dict[int, int] = {}
+        base_counts: dict[tuple, int] = {}   # (range_id, pageset_id) -> num_records
+        tail_counts: dict[tuple, int] = {}
         max_range = -1
 
         for fname in os.listdir(table_dir):
             if not fname.endswith('.pg'):
                 continue
-            # filename: <range_id>_<base|tail>_<pageset_id>_<col_id>.pg
             parts = fname[:-3].split('_')
             if len(parts) != 4:
                 continue
@@ -170,56 +166,41 @@ class Table:
             except ValueError:
                 continue
             max_range = max(max_range, r)
-            if side == 'base':
-                base_shape[r] = max(base_shape.get(r, -1), ps)
-            else:
-                tail_shape[r] = max(tail_shape.get(r, -1), ps)
+            if c == 0:  # only need one column to get num_records
+                path = os.path.join(table_dir, fname)
+                with open(path, 'rb') as f:
+                    num_records = struct.unpack('<q', f.read(8))[0]
+                if side == 'base':
+                    base_shape[r] = max(base_shape.get(r, -1), ps)
+                    base_counts[(r, ps)] = num_records
+                else:
+                    tail_shape[r] = max(tail_shape.get(r, -1), ps)
+                    tail_counts[(r, ps)] = num_records
 
         if max_range < 0:
-            return  # no page files found
+            return
 
-        # Build empty PageRange objects with the right number of pagesets
+        # Rebuild PageRange structure skeletons (no Page objects)
         self.page_ranges = []
         for r in range(max_range + 1):
             pr = PageRange.__new__(PageRange)
             pr.num_columns = self.num_columns
             pr.total_columns = self.total_columns
             pr.merge_queued = False
-            pr.merge_inprogess = False
+            pr.merge_inprogress = False
             pr.updates_postmerge = 0
             pr.base_tps = []
-            pr.base_pages = []
-            pr.tail_pages = []
 
-            num_base_ps = base_shape.get(r, -1) + 1
-            for _ in range(num_base_ps):
-                pr.base_pages.append([Page() for _ in range(self.total_columns)])
-                pr.base_tps.append(INVALID_RID)
+            num_base = base_shape.get(r, -1) + 1
+            pr.num_base_pagesets = num_base
+            pr.base_pageset_counts = [base_counts.get((r, ps), 0) for ps in range(num_base)]
+            pr.base_tps = [INVALID_RID] * num_base
 
-            num_tail_ps = tail_shape.get(r, -1) + 1
-            for _ in range(num_tail_ps):
-                pr.tail_pages.append([Page() for _ in range(self.total_columns)])
+            num_tail = tail_shape.get(r, -1) + 1
+            pr.num_tail_pagesets = num_tail
+            pr.tail_pageset_counts = [tail_counts.get((r, ps), 0) for ps in range(num_tail)]
 
             self.page_ranges.append(pr)
-
-        # Read every page file into the right slot
-        for fname in os.listdir(table_dir):
-            if not fname.endswith('.pg'):
-                continue
-            parts = fname[:-3].split('_')
-            if len(parts) != 4:
-                continue
-            try:
-                r, side, ps, c = int(parts[0]), parts[1], int(parts[2]), int(parts[3])
-            except ValueError:
-                continue
-            path = os.path.join(table_dir, fname)
-            page = self._read_page(path)
-            pr = self.page_ranges[r]
-            if side == 'base':
-                pr.base_pages[ps][c] = page
-            else:
-                pr.tail_pages[ps][c] = page
 
     @staticmethod
     def _page_path(table_dir: str, range_id: int, is_tail: bool,
@@ -389,7 +370,7 @@ class Table:
                 with self.table_lock:
                     if 0 <= range_id < len(self.page_ranges):
                         pr = self.page_ranges[range_id]
-                        pr.merge_inprogess = False
+                        pr.merge_inprogress = False
                         pr.merge_queued = False
 
             try: 
@@ -402,7 +383,7 @@ class Table:
             pr = self.page_ranges[range_id]
             pr.updates_postmerge += 1
 
-            if pr.merge_inprogess == True or pr.merge_queued == True:
+            if pr.merge_inprogress == True or pr.merge_queued == True:
                 return 
 
             if pr.updates_postmerge >= self.merge_constant:
@@ -427,35 +408,42 @@ class Table:
     # records functions
 
     def write_record(self, is_tail: bool, values: list[int], target_range_id: int = None):
-
         if is_tail:
-            if target_range_id is None: 
+            if target_range_id is None:
                 raise ValueError("no target range specified")
-            if not ( 0 <= target_range_id < len(self.page_ranges)):
-                raise IndexError("invalid target range")
-
-            # add record to target tail range corrleated with specific base range
             range_id = target_range_id
             pr = self.page_ranges[range_id]
-            pageset_id, slot = pr.write_tail(values)
-
+            pageset_id, slot = pr.alloc_tail_slot()
         else:
-            # check if current range is full, open new one
-            #if pr.base_full():
-            #    self.page_ranges.append(PageRange(self.num_columns)) --> already being checked in current_range
-
             pr = self._current_range()
             range_id = len(self.page_ranges) - 1
-            pageset_id, slot = pr.write_base(values)
+            pageset_id, slot = pr.alloc_base_slot()
 
         rid = values[RID_COLUMN]
         self.page_directory[rid] = (range_id, is_tail, pageset_id, slot)
-        return pageset_id, slot
 
+        # Write each column through bufferpool
+        for col_id, val in enumerate(values):
+            pid = self._pid(range_id, is_tail, pageset_id, col_id)
+            page = self.bufferpool.get_page(pid)
+            # write into the correct slot
+            offset = slot * 8
+            page.data[offset:offset+8] = int(val).to_bytes(8, byteorder='little', signed=True)
+            # keep num_records in sync
+            if slot >= page.num_records:
+                page.num_records = slot + 1
+            self.bufferpool.mark_dirty(pid)
+            self.bufferpool.unpin(pid)
+
+        return pageset_id, slot
 
     def read_val(self, rid: int, col_id: int):
         range_id, is_tail, pageset_id, slot = self.page_directory[rid]
-        return self.page_ranges[range_id].read(is_tail, pageset_id, slot, col_id)
+        pid = self._pid(range_id, is_tail, pageset_id, col_id)
+        page = self.bufferpool.get_page(pid)
+        val = page.read(slot)
+        self.bufferpool.unpin(pid)
+        return val
 
     # metada and stuff 
 
@@ -634,47 +622,49 @@ class Table:
 
 
     def __merge(self, range_id : int):
-        print("merge is happening")
-
-
         # part 1 where everythings being copied under lock 
         with self.table_lock:
-
             pr = self.page_ranges[range_id]
-            if pr.merge_inprogess:
+            if pr.merge_inprogress:
                 return
-
-            pr.merge_inprogess = True
+            pr.merge_inprogress = True
             pr.merge_queued = False
 
+    # Clone base pages by reading from bufferpool
             basepages_clone = []
-            for pageset in pr.base_pages:
-                temp = []
-                for page in pageset:
-                    temp.append(page.merge_clone())
-                basepages_clone.append(temp)
+            for ps_id in range(pr.num_base_pagesets):
+                pageset = []
+                for col_id in range(self.total_columns):
+                    pid = self._pid(range_id, False, ps_id, col_id)
+                    orig = self.bufferpool.get_page(pid)
+                    pageset.append(orig.merge_clone())
+                    self.bufferpool.unpin(pid)
+                basepages_clone.append(pageset)
 
+        # Clone tail pages
             tailpages_clone = []
-            for pageset in pr.tail_pages:
-                temp = []
-                for page in pageset:
-                    temp.append(page.merge_clone())
-                tailpages_clone.append(temp)
+            for ps_id in range(pr.num_tail_pagesets):
+                pageset = []
+                for col_id in range(self.total_columns):
+                    pid = self._pid(range_id, True, ps_id, col_id)
+                    orig = self.bufferpool.get_page(pid)
+                    pageset.append(orig.merge_clone())
+                    self.bufferpool.unpin(pid)
+            tailpages_clone.append(pageset)
 
-            tps_copy = pr.base_tps.copy()
+        tps_copy = pr.base_tps.copy()
+        page_dir_copy = {}
+        for rid, loc in self.page_directory.items():
+            if loc[0] == range_id:
+                page_dir_copy[rid] = loc
 
-            page_dir_copy = {}
-            for rid, loc in self.page_directory.items():
-                if loc[0] == range_id:
-                    page_dir_copy[rid] = loc
+        tailtobase_merge_copy = {}
+        for rid, loc in page_dir_copy.items():
+            _, is_tail, _, _ = loc
+            if is_tail and rid in self.tailtobase_merge:
+                tailtobase_merge_copy[rid] = self.tailtobase_merge[rid]
 
-            tailtobase_merge_copy = {}
-            for rid, loc in page_dir_copy.items():
-                loc_range, is_tail, pageset_id, slot = loc
-                if is_tail and rid in self.tailtobase_merge:
-                    tailtobase_merge_copy[rid] = self.tailtobase_merge[rid]
-
-            deleted = set(self.deleted)
+        deleted = set(self.deleted)
 
 
         # part 2 where the actual merge is happening 
@@ -699,8 +689,7 @@ class Table:
             if base_rid not in page_dir_copy:
                 continue
 
-            base_range, is_tailbase, base_pageset, base_slot = page_dir_copy[base_rid]
-            
+            _, _, base_pageset, base_slot = page_dir_copy[base_rid]
             old_tps = tps_copy[base_pageset]
 
             prev_max = max_tail.get(base_pageset, old_tps)
@@ -726,16 +715,24 @@ class Table:
         with self.table_lock:
             if not (0 <= range_id < len(self.page_ranges)):
                 return
-
             pr = self.page_ranges[range_id]
 
-            pr.base_pages = merged_pages
+            for ps_id, pageset in enumerate(merged_pages):
+                for col_id, page in enumerate(pageset):
+                    pid = self._pid(range_id, False, ps_id, col_id)
+                    bp_page = self.bufferpool.get_page(pid)
+                    bp_page.data[:] = page.data
+                    bp_page.num_records = page.num_records
+                    self.bufferpool.mark_dirty(pid)
+                    self.bufferpool.unpin(pid)
+                # update counts
+                pr.base_pageset_counts[ps_id] = pageset[0].num_records
 
             for i in range(len(pr.base_tps)):
                 if i < len(new_base_tps) and new_base_tps[i] > pr.base_tps[i]:
                     pr.base_tps[i] = new_base_tps[i]
 
-            pr.merge_inprogess = False
+            pr.merge_inprogress = False
             pr.merge_queued = False
             pr.updates_postmerge = 0
 

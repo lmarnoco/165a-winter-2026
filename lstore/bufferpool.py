@@ -18,10 +18,6 @@ class BufferPool:
         self.frames: dict[str, dict] = {}
         self.lru: OrderedDict = OrderedDict()  # oldest → newest
 
-
-
-
-
     def get_page(self, pid: str) -> Page:
         if pid in self.frames:
             self.lru.move_to_end(pid)
@@ -65,7 +61,12 @@ class BufferPool:
         raise RuntimeError("BufferPool: all pages pinned, cannot evict")
 
     def _filepath(self, pid: str) -> str:
-        return os.path.join(self.path, pid + ".pg")
+        # pid format: tablename_rangeid_side_pagesetid_colid
+        # files live at: db_path/tablename/rangeid_side_pagesetid_colid.pg
+        parts = pid.split('_', 1)  # split on first underscore only
+        table_name = parts[0]
+        rest = parts[1]  # rangeid_side_pagesetid_colid
+        return os.path.join(self.path, table_name, rest + '.pg')
 
     def _load_from_disk(self, pid: str) -> Page:
         page = Page()

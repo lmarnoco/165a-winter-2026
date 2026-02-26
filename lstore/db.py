@@ -1,5 +1,6 @@
 from lstore.table import Table
 import os # use path, mkdir, isdir
+from lstore.bufferpool import BufferPool
 
 class Database():
     """
@@ -34,12 +35,14 @@ class Database():
         if not os.path.isdir(self.path):
             os.makedirs(self.path)
 
+        self.bufferpool = BufferPool(capacity=1024, path=path)
+
         # Reload table schemas if they exist
         meta_path = os.path.join(self.path, "tables.meta")
         if os.path.exists(meta_path):
             self._load_tables_meta(meta_path)
 
-
+        
         
 
     def close(self):
@@ -47,14 +50,23 @@ class Database():
         Close the database
         Later need to implement save function for tables and write to disk.
         """
-        # Stop background merge threads before writing to avoid races
         for table in self.tables.values():
             table.stop_merge_thread()
 
-        # Persist each table's pages + metadata
         if self.path:
+        # Create all table directories first
             for table in self.tables.values():
-                table.save_to_disk(self.path)
+                table_dir = os.path.join(self.path, table.name)
+                os.makedirs(table_dir, exist_ok=True)
+        
+            # Now flush bufferpool (all dirs exist)
+            if self.bufferpool is not None:
+                self.bufferpool.flush_all()
+        
+            # Save metadata
+            for table in self.tables.values():
+                table._save_metadata(os.path.join(self.path, table.name))
+        
             self._save_tables_meta()
         
     
