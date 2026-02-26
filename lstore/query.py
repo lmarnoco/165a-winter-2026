@@ -79,6 +79,7 @@ class Query:
                 val = self.table.read_val(rid, 4 + search_key_index)
                 if val == search_key:
                     rids_list.append(rid)
+        
                     
         if not rids_list:
             return []

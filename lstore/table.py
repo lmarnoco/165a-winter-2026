@@ -108,7 +108,7 @@ class Table:
         self.merge_queue = queue.Queue()
         self.stop_merge = threading.Event()
         self.merge_thread = None
-        self.merge_constant = 32 # ?? just how often it merges... wasn't sure what to put here 
+        self.merge_constant = 10 # ?? just how often it merges... wasn't sure what to put here 
         self.bufferpool = None  # injected by Database
         self.start_merge_thread()
 
@@ -383,12 +383,14 @@ class Table:
             pr = self.page_ranges[range_id]
             pr.updates_postmerge += 1
 
-            if pr.merge_inprogress == True or pr.merge_queued == True:
-                return 
+            if pr.merge_inprogress or pr.merge_queued:
+                return
 
             if pr.updates_postmerge >= self.merge_constant:
-                pr.merge_queued = True;
-                self.merge_queue.put(range_id)
+                # only schedule if bufferpool has enough headroom
+                if self.bufferpool is not None and len(self.bufferpool.frames) < self.bufferpool.capacity // 2:
+                    pr.merge_queued = True
+                    self.merge_queue.put(range_id)
 
     def latest_read_rid(self, base_rid : int):
         latest_tail_rid = self.base_indirection.get(base_rid, INVALID_RID)
@@ -441,6 +443,7 @@ class Table:
         range_id, is_tail, pageset_id, slot = self.page_directory[rid]
         pid = self._pid(range_id, is_tail, pageset_id, col_id)
         page = self.bufferpool.get_page(pid)
+        #print(f"read_val: rid={rid} is_tail={is_tail} pid={pid} slot={slot} num_records={page.num_records}")
         val = page.read(slot)
         self.bufferpool.unpin(pid)
         return val
@@ -513,41 +516,42 @@ class Table:
         if not update_cols:
             return base_rid  # Return without doing anything
 
-        base_range_id = self.get_base_range(base_rid)
+        with self.table_lock:
+            base_range_id = self.get_base_range(base_rid)
             
-        tail_rid = self.get_RID()
-        last_tail_rid = self.base_indirection.get(base_rid, INVALID_RID)
-        if last_tail_rid == INVALID_RID:
-            prev_rid = base_rid
-        else:
-            prev_rid = last_tail_rid
+            tail_rid = self.get_RID()
+            last_tail_rid = self.base_indirection.get(base_rid, INVALID_RID)
+            if last_tail_rid == INVALID_RID:
+                prev_rid = base_rid
+            else:
+                prev_rid = last_tail_rid
 
-        curr_vals = self.latest_cols(base_rid)
-        new_vals = curr_vals.copy()     
-        for col_ids, val in update_cols.items():
+            curr_vals = self.latest_cols(base_rid)
+            new_vals = curr_vals.copy()     
+            for col_ids, val in update_cols.items():
             #if val is not None: #Delete
                 new_vals[col_ids] = val
 
-        curr_schema = self.base_schema.get(base_rid, 0)
-        new_schema = curr_schema
-        for col_ids, val in update_cols.items(): #Change
+            curr_schema = self.base_schema.get(base_rid, 0)
+            new_schema = curr_schema
+            for col_ids, val in update_cols.items(): #Change
             #if val is not None:
                 new_schema |= (1 << col_ids)
 
-        curr_time = int(time())
+            curr_time = int(time())
 
-        values = [0] * self.total_columns
-        values[INDIRECTION_COLUMN] = prev_rid  
-        values[RID_COLUMN] = tail_rid
-        values[TIMESTAMP_COLUMN] = curr_time
-        values[SCHEMA_ENCODING_COLUMN] = new_schema
-        values[4:] = new_vals
+            values = [0] * self.total_columns
+            values[INDIRECTION_COLUMN] = prev_rid  
+            values[RID_COLUMN] = tail_rid
+            values[TIMESTAMP_COLUMN] = curr_time
+            values[SCHEMA_ENCODING_COLUMN] = new_schema
+            values[4:] = new_vals
 
-        # while not self.tail_capacity():
-        #     self.new_pages(is_tail = True) #Delete
-        pages_id, index = self.write_record(is_tail = True, values = values, target_range_id = base_range_id)
+            # while not self.tail_capacity():
+            #     self.new_pages(is_tail = True) #Delete
+            pages_id, index = self.write_record(is_tail = True, values = values, target_range_id = base_range_id)
 
-        with self.table_lock:
+ 
             self.tailtobase_merge[tail_rid] = base_rid
 
             self.base_indirection[base_rid] = tail_rid
@@ -566,7 +570,6 @@ class Table:
         
 
     def read_record(self, base_rid: int, projected_cols: list[int]):
-        
         if base_rid not in self.page_directory:
             return  None
         if base_rid in self.deleted:
@@ -582,7 +585,7 @@ class Table:
                 else: #added
                     cols[c] = self.read_val(rid, 4 + c)
 
-        key_val = self.read_val(rid, 4 + self.key)
+        key_val = self.read_val(base_rid, 4 + self.key)
 
         return Record(base_rid, key_val, cols) # need base_rid returned for update? 
         
@@ -630,7 +633,7 @@ class Table:
             pr.merge_inprogress = True
             pr.merge_queued = False
 
-    # Clone base pages by reading from bufferpool
+            # Clone base pages by reading from bufferpool
             basepages_clone = []
             for ps_id in range(pr.num_base_pagesets):
                 pageset = []
@@ -641,7 +644,7 @@ class Table:
                     self.bufferpool.unpin(pid)
                 basepages_clone.append(pageset)
 
-        # Clone tail pages
+            # Clone tail pages
             tailpages_clone = []
             for ps_id in range(pr.num_tail_pagesets):
                 pageset = []
@@ -650,21 +653,21 @@ class Table:
                     orig = self.bufferpool.get_page(pid)
                     pageset.append(orig.merge_clone())
                     self.bufferpool.unpin(pid)
-            tailpages_clone.append(pageset)
+                tailpages_clone.append(pageset)
 
-        tps_copy = pr.base_tps.copy()
-        page_dir_copy = {}
-        for rid, loc in self.page_directory.items():
-            if loc[0] == range_id:
-                page_dir_copy[rid] = loc
+            tps_copy = pr.base_tps.copy()
+            page_dir_copy = {}
+            for rid, loc in self.page_directory.items():
+                if loc[0] == range_id:
+                    page_dir_copy[rid] = loc
 
-        tailtobase_merge_copy = {}
-        for rid, loc in page_dir_copy.items():
-            _, is_tail, _, _ = loc
-            if is_tail and rid in self.tailtobase_merge:
-                tailtobase_merge_copy[rid] = self.tailtobase_merge[rid]
+            tailtobase_merge_copy = {}
+            for rid, loc in page_dir_copy.items():
+                _, is_tail, _, _ = loc
+                if is_tail and rid in self.tailtobase_merge:
+                    tailtobase_merge_copy[rid] = self.tailtobase_merge[rid]
 
-        deleted = set(self.deleted)
+            deleted = set(self.deleted)
 
 
         # part 2 where the actual merge is happening 
@@ -709,8 +712,6 @@ class Table:
             if new_tps > new_base_tps[base_pageset]:
                 new_base_tps[base_pageset] = new_tps
 
-        
-        # part 3 where we change page dir pointer to new merged pages with lock 
 
         with self.table_lock:
             if not (0 <= range_id < len(self.page_ranges)):
@@ -725,7 +726,6 @@ class Table:
                     bp_page.num_records = page.num_records
                     self.bufferpool.mark_dirty(pid)
                     self.bufferpool.unpin(pid)
-                # update counts
                 pr.base_pageset_counts[ps_id] = pageset[0].num_records
 
             for i in range(len(pr.base_tps)):
@@ -735,7 +735,6 @@ class Table:
             pr.merge_inprogress = False
             pr.merge_queued = False
             pr.updates_postmerge = 0
-
 
     #Iterates through Previous RID until desired
     def get_previous_rid(self, base_rid: int, version: int):
@@ -747,3 +746,5 @@ class Table:
                 return base_rid
             rid = prev_rid
         return rid
+    
+    
