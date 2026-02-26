@@ -18,11 +18,13 @@ class Database():
     When (get_table) is called, self.tables is searched for the table with the passed name and returned if found.
 
     """
-    def __init__(self):
+    def __init__(self, bufferpool_capacity: int = 32, merge_threshold: int = 10):
 
         self.tables: dict[str, Table] = {}
         self.path: str = None
         self.bufferpool = None  # reserved for future use
+        self.bufferpool_capacity = bufferpool_capacity
+        self.merge_threshold = merge_threshold
 
     
     def open(self, path):
@@ -35,7 +37,7 @@ class Database():
         if not os.path.isdir(self.path):
             os.makedirs(self.path)
 
-        self.bufferpool = BufferPool(capacity=32, path=path)
+        self.bufferpool = BufferPool(capacity=self.bufferpool_capacity, path=path)
 
         # Reload table schemas if they exist
         meta_path = os.path.join(self.path, "tables.meta")
@@ -51,6 +53,9 @@ class Database():
         Later need to implement save function for tables and write to disk.
         """
         for table in self.tables.values():
+            table.publish_merge(wait=True)
+
+        for table in self.tables.values():
             table.stop_merge_thread()
 
         if self.path:
@@ -58,7 +63,7 @@ class Database():
             for table in self.tables.values():
                 table_dir = os.path.join(self.path, table.name)
                 os.makedirs(table_dir, exist_ok=True)
-        
+
             # Now flush bufferpool (all dirs exist)
             if self.bufferpool is not None:
                 self.bufferpool.flush_all()
@@ -84,7 +89,7 @@ class Database():
             return self.tables[name]
         
         # Create new table object with passed parameters
-        table = Table(name, num_columns, key_index)
+        table = Table(name, num_columns, key_index, merge_threshold=self.merge_threshold)
 
         table.bufferpool = self.bufferpool
         
@@ -141,7 +146,7 @@ class Database():
                 if not line:
                     continue
                 name, num_columns, key = line.split(',')
-                table = Table(name, int(num_columns), int(key))
+                table = Table(name, int(num_columns), int(key), merge_threshold=self.merge_threshold)
                 table.bufferpool = self.bufferpool
                 table.load_from_disk(self.path)      # restore pages + metadata
                 self._rebuild_indexes(table)          # indexes are not persisted; rebuild from data

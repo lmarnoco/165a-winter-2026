@@ -1,6 +1,6 @@
 from lstore.index import Index
 from lstore.page import Page
-from time import time
+from time import time, sleep
 
 import threading
 import queue
@@ -13,6 +13,7 @@ TIMESTAMP_COLUMN = 2
 SCHEMA_ENCODING_COLUMN = 3
 
 INVALID_RID = 0
+DELETED_INDIRECTION = -1
 
 MAX_BASE_PAGES_PER_RANGE = 16
 
@@ -22,6 +23,7 @@ class PageRange:
         self.total_columns = 4 + num_columns
         self.merge_queued = False
         self.merge_inprogress = False
+        self.merge_ready = False
         self.updates_postmerge = 0
 
         # Structure tracking only — no Page objects
@@ -88,7 +90,7 @@ class Table:
     :param num_columns: int     #Number of Columns: all columns are integer
     :param key: int             #Index of table key in columns
     """
-    def __init__(self, name, num_columns, key):
+    def __init__(self, name, num_columns, key, merge_threshold: int = 10):
         self.name = name
         self.key = key
         self.num_columns = num_columns
@@ -108,7 +110,8 @@ class Table:
         self.merge_queue = queue.Queue()
         self.stop_merge = threading.Event()
         self.merge_thread = None
-        self.merge_constant = 10 # ?? just how often it merges... wasn't sure what to put here 
+        self.merge_constant = merge_threshold
+        self.pending_merges = {}  # range_id -> (merged_pages, new_base_tps, covered_updates)
         self.bufferpool = None  # injected by Database
         self.start_merge_thread()
 
@@ -141,9 +144,10 @@ class Table:
         # Since bufferpool.path == db_path and page files are named
         # tablename_range_side_pageset_col.pg, they land in the right place.
         #os.makedirs(table_dir, exist_ok=True)
-        #if self.bufferpool is not None:
-            #self.bufferpool.flush_all()
-        pass
+        self.publish_merge(wait = True)
+
+        if self.bufferpool is not None:
+            self.bufferpool.flush_all()
 
     def _load_pages(self, table_dir: str):
         if not os.path.isdir(table_dir):
@@ -188,6 +192,7 @@ class Table:
             pr.total_columns = self.total_columns
             pr.merge_queued = False
             pr.merge_inprogress = False
+            pr.merge_ready = False
             pr.updates_postmerge = 0
             pr.base_tps = []
 
@@ -372,29 +377,106 @@ class Table:
                         pr = self.page_ranges[range_id]
                         pr.merge_inprogress = False
                         pr.merge_queued = False
+                        pr.merge_ready = False
 
             try: 
                 self.merge_queue.task_done()
             except Exception: 
                 pass 
 
+    def merge_lock_check(self, range_id: int):
+        pr = self.page_ranges[range_id]
+
+        if pr.merge_inprogress or pr.merge_queued or pr.merge_ready:
+            return
+
+        if pr.updates_postmerge < self.merge_constant:
+            return
+
+        pr.merge_queued = True
+        self.merge_queue.put(range_id)
+
     def schedule_merge(self, range_id : int):
         with self.table_lock:
             pr = self.page_ranges[range_id]
             pr.updates_postmerge += 1
+            self.merge_lock_check(range_id)
 
-            if pr.merge_inprogress or pr.merge_queued:
-                return
+    # added the actual contention free part? 
+    # the merge does the atomic merge and swap stuff so the merge can actually point to the new base page and be published
+    def publish_merge(self, wait: bool = False):
+        published = False
 
-            if pr.updates_postmerge >= self.merge_constant:
-                # only schedule if bufferpool has enough headroom
-                if self.bufferpool is not None and len(self.bufferpool.frames) < self.bufferpool.capacity // 2:
-                    pr.merge_queued = True
-                    self.merge_queue.put(range_id)
+        while True:
+            publish_recent = False
+
+            with self.table_lock:
+                ready_ranges = sorted(self.pending_merges.keys())
+
+                for range_id in ready_ranges:
+                    payload = self.pending_merges.pop(range_id, None)
+                    if payload is None:
+                        continue
+
+                    if not (0 <= range_id < len(self.page_ranges)):
+                        continue
+
+                    merged_pages, new_tps, covered = payload
+                    pr = self.page_ranges[range_id]
+
+                    # atomic pointer swap 
+                    swapped_all = True
+                    for ps_id, pageset in enumerate(merged_pages):
+                        for col_id, page in enumerate(pageset):
+                            pid = self._pid(range_id, False, ps_id, col_id)
+                            if not self.bufferpool.install_page(pid, page, dirty = True):
+                                swapped_all = False
+                                break
+                        if not swapped_all:
+                            break
+                    
+                    if not swapped_all:
+                        self.pending_merges[range_id] = (merged_pages, new_tps, covered)
+                        pr.merge_ready = True
+                        continue
+
+                    for i in range(len(pr.base_tps)):
+                        if i < len(new_tps) and new_tps[i] > pr.base_tps[i]:
+                            pr.base_tps[i] = new_tps[i]
+
+                    pr.merge_ready = False
+                    pr.merge_inprogress = False
+                    pr.merge_queued = False
+                    pr.updates_postmerge = max(0, pr.updates_postmerge - covered)
+
+                    # any new updates should get queued again here... 
+                    self.merge_lock_check(range_id)
+
+                    publish_recent = True
+                    published = True
+
+                pending_work = any(
+                    pr.merge_queued or pr.merge_inprogress or pr.merge_ready
+                    for pr in self.page_ranges
+                )
+
+            if not wait:
+                return published
+
+            if not pending_work:
+                return published
+
+            if not publish_recent:
+                sleep(0.001)
+
 
     def latest_read_rid(self, base_rid : int):
         latest_tail_rid = self.base_indirection.get(base_rid, INVALID_RID)
+        
         if latest_tail_rid == INVALID_RID:
+            return base_rid
+        
+        if latest_tail_rid == DELETED_INDIRECTION:
             return base_rid
 
         range_id, is_tail, base_pageset, slot = self.page_directory[base_rid]
@@ -452,6 +534,10 @@ class Table:
 
     def latest_rid(self, base_rid: int):
         tail_rid = self.base_indirection.get(base_rid, INVALID_RID)
+        
+        if tail_rid == DELETED_INDIRECTION:
+            return base_rid
+
         latest_rid = tail_rid if tail_rid != INVALID_RID else base_rid
         return latest_rid
 
@@ -506,7 +592,7 @@ class Table:
     def update_tail_record(self, base_rid: int, update_cols: dict[int, int]):
         if base_rid not in self.page_directory:
             raise KeyError("record not found")
-        if base_rid in self.deleted:
+        if base_rid in self.deleted or self.base_indirection.get(base_rid) == DELETED_INDIRECTION:
             raise KeyError("record has been deleted")
 
         if self.key in update_cols: #double checking
@@ -602,6 +688,7 @@ class Table:
             self.index.remove_entry(c, base_rid, latest[c])
         
         self.deleted.add(base_rid)
+        self.base_indirection[base_rid] = DELETED_INDIRECTION
 
         return True;    
 
@@ -626,35 +713,17 @@ class Table:
 
     def __merge(self, range_id : int):
         # part 1 where everythings being copied under lock 
+        covered_updates = 0
         with self.table_lock:
             pr = self.page_ranges[range_id]
-            if pr.merge_inprogress:
+            if pr.merge_inprogress == True or pr.merge_ready == True:
                 return
             pr.merge_inprogress = True
             pr.merge_queued = False
+            covered_updates = pr.updates_postmerge
 
-            # Clone base pages by reading from bufferpool
-            basepages_clone = []
-            for ps_id in range(pr.num_base_pagesets):
-                pageset = []
-                for col_id in range(self.total_columns):
-                    pid = self._pid(range_id, False, ps_id, col_id)
-                    orig = self.bufferpool.get_page(pid)
-                    pageset.append(orig.merge_clone())
-                    self.bufferpool.unpin(pid)
-                basepages_clone.append(pageset)
-
-            # Clone tail pages
-            tailpages_clone = []
-            for ps_id in range(pr.num_tail_pagesets):
-                pageset = []
-                for col_id in range(self.total_columns):
-                    pid = self._pid(range_id, True, ps_id, col_id)
-                    orig = self.bufferpool.get_page(pid)
-                    pageset.append(orig.merge_clone())
-                    self.bufferpool.unpin(pid)
-                tailpages_clone.append(pageset)
-
+            num_base_pagesets = pr.num_base_pagesets
+            num_tail_pagesets = pr.num_tail_pagesets
             tps_copy = pr.base_tps.copy()
             page_dir_copy = {}
             for rid, loc in self.page_directory.items():
@@ -669,6 +738,27 @@ class Table:
 
             deleted = set(self.deleted)
 
+            # Clone base pages by reading from bufferpool
+        basepages_clone = []
+        for ps_id in range(num_base_pagesets):
+            pageset = []
+            for col_id in range(self.total_columns):
+                pid = self._pid(range_id, False, ps_id, col_id)
+                orig = self.bufferpool.get_page(pid)
+                pageset.append(orig.merge_clone())
+                self.bufferpool.unpin(pid)
+            basepages_clone.append(pageset)
+
+            # Clone tail pages
+        tailpages_clone = []
+        for ps_id in range(num_tail_pagesets):
+            pageset = []
+            for col_id in range(self.total_columns):
+                pid = self._pid(range_id, True, ps_id, col_id)
+                orig = self.bufferpool.get_page(pid)
+                pageset.append(orig.merge_clone())
+                self.bufferpool.unpin(pid)
+            tailpages_clone.append(pageset)
 
         # part 2 where the actual merge is happening 
 
@@ -717,24 +807,10 @@ class Table:
             if not (0 <= range_id < len(self.page_ranges)):
                 return
             pr = self.page_ranges[range_id]
-
-            for ps_id, pageset in enumerate(merged_pages):
-                for col_id, page in enumerate(pageset):
-                    pid = self._pid(range_id, False, ps_id, col_id)
-                    bp_page = self.bufferpool.get_page(pid)
-                    bp_page.data[:] = page.data
-                    bp_page.num_records = page.num_records
-                    self.bufferpool.mark_dirty(pid)
-                    self.bufferpool.unpin(pid)
-                pr.base_pageset_counts[ps_id] = pageset[0].num_records
-
-            for i in range(len(pr.base_tps)):
-                if i < len(new_base_tps) and new_base_tps[i] > pr.base_tps[i]:
-                    pr.base_tps[i] = new_base_tps[i]
-
+            self.pending_merges[range_id] = (merged_pages, new_base_tps, covered_updates)
             pr.merge_inprogress = False
             pr.merge_queued = False
-            pr.updates_postmerge = 0
+            pr.merge_ready = True
 
     #Iterates through Previous RID until desired
     def get_previous_rid(self, base_rid: int, version: int):
