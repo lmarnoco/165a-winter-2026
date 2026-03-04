@@ -20,7 +20,7 @@ class Query:
     # Returns True upon succesful deletion
     # Return False if record doesn't exist or is locked due to 2PL
     """
-    def delete(self, primary_key):
+    def delete(self, primary_key, transaction=None):
         self.table.publish_merge()
         
         locations = self.table.index.locate(self.table.key, primary_key)
@@ -43,7 +43,7 @@ class Query:
     # Return True upon succesful insertion
     # Returns False if insert fails for whatever reason
     """
-    def insert(self, *columns):
+    def insert(self, *columns, transaction=None):
         self.table.publish_merge()
 
         key_val = columns[self.table.key]
@@ -67,7 +67,7 @@ class Query:
     # Returns False if record locked by TPL
     # Assume that select will never be called on a key that doesn't exist
     """
-    def select(self, search_key, search_key_index, projected_columns_index):
+    def select(self, search_key, search_key_index, projected_columns_index, transaction=None):
         self.table.publish_merge()
         
         if self.table.index.indices[search_key_index] is not None:
@@ -113,7 +113,7 @@ class Query:
     # Returns False if record locked by TPL
     # Assume that select will never be called on a key that doesn't exist
     """
-    def select_version(self, search_key, search_key_index, projected_columns_index, relative_version):
+    def select_version(self, search_key, search_key_index, projected_columns_index, relative_version, transaction=None):
         self.table.publish_merge()
 
         if relative_version <= 0: 
@@ -180,7 +180,7 @@ class Query:
     # Returns True if update is succesful
     # Returns False if no records exist with given key or if the target record cannot be accessed due to 2PL locking
     """
-    def update(self, primary_key, *columns):
+    def update(self, primary_key, *columns, transaction=None):
         self.table.publish_merge()
 
         if columns[self.table.key] is not None and columns[self.table.key] != primary_key:
@@ -219,7 +219,7 @@ class Query:
     # Returns the summation of the given range upon success
     # Returns False if no record exists in the given range
     """
-    def sum(self, start_range, end_range, aggregate_column_index):
+    def sum(self, start_range, end_range, aggregate_column_index, transaction=None):
         self.table.publish_merge()
         
         og_rids = self.table.index.locate_range(start_range, end_range, self.table.key)
@@ -257,7 +257,7 @@ class Query:
     # Returns the summation of the given range upon success
     # Returns False if no record exists in the given range
     """
-    def sum_version(self, start_range, end_range, aggregate_column_index, relative_version):
+    def sum_version(self, start_range, end_range, aggregate_column_index, relative_version, transaction=None):
         self.table.publish_merge()
 
 
@@ -301,7 +301,7 @@ class Query:
     # Returns True is increment is successful
     # Returns False if no record matches key or if target record is locked by 2PL.
     """
-    def increment(self, key, column):
+    def increment(self, key, column, transaction=None):
         self.table.publish_merge()
 
         result = self.select(key, self.table.key, [1] * self.table.num_columns)
