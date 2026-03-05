@@ -1,5 +1,6 @@
 from lstore.table import Table, Record
 from lstore.index import Index
+from lstore.lock_manager import LockManager
 
 class Transaction:
 
@@ -10,7 +11,7 @@ class Transaction:
         self.queries = []
         #M3 Changes
 
-        #list of (RID, lock_type) or (table, RID, type)
+        #list of (RIDS, transaction)
         self.held_locks = []
         #list of (undo_function, arguments)
         self.undo_log = []
@@ -58,8 +59,8 @@ class Transaction:
         return True
 
     def _release_all_locks(self):
-        for lock_info in self.held_locks:
-            pass
+        for lock_info, rid in self.held_locks:
+            lock_info.unlock(rid, self)
         self.held_locks = []
 
 

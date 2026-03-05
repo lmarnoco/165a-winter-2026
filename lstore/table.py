@@ -322,9 +322,10 @@ class Table:
 
     
     def get_RID(self):
-        rid = self.next_rid
-        self.next_rid += 1
-        return rid;
+        with self.table_lock:
+            rid = self.next_rid
+            self.next_rid += 1
+            return rid;
 
     def get_base_range(self, base_rid):
         if base_rid not in self.page_directory:

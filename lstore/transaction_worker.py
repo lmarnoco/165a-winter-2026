@@ -1,5 +1,7 @@
 from lstore.table import Table, Record
 from lstore.index import Index
+from lstore.lock_manager import LockManager
+from lstore.transaction import Transaction
 import threading
 import time
 
@@ -9,6 +11,7 @@ class TransactionWorker:
     # Creates a transaction worker object.
     """
     def __init__(self, transactions = []):
+        self.lock_manager = LockManager
         self.stats = []
         self.transactions = transactions
         self.result = 0
@@ -19,6 +22,7 @@ class TransactionWorker:
     Appends t to transactions
     """
     def add_transaction(self, t):
+        t.lock_manager= self.lock_manager
         self.transactions.append(t)
 
         
