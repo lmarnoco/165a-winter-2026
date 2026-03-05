@@ -5,6 +5,14 @@ A data strucutre holding indices for various columns of a table. Key column shou
 import os
 import pickle
 
+#Do we need these imports? -> 
+import threading
+from lstore.disk import Disk
+from lstore.bufferpool import BUFFERPOOL
+from lstore.record_info import RID
+import lstore.config as Config
+
+
 class Index:
 
     def __init__(self, table):
@@ -13,6 +21,8 @@ class Index:
 
         #init table
         self.table = table
+
+        #I think I want to implement a locking mechanism with Rlock
         #create index for primary key
         if table.key is not None:
            self.create_index(table.key)
@@ -97,6 +107,7 @@ class Index:
         self.indices[column_number] = None
 
 #helper functions: (we need them because otherwise data doesn't enter into the index)
+    # should we move these into a new file?
     def add_entry(self, column_number, rid, value):
         if self.indices[column_number] is None: return
         if value not in self.indices[column_number]:
@@ -139,3 +150,6 @@ class Index:
                 self.indices = pickle.load(file)
             return True
         return False
+
+
+#Milestone 3 
