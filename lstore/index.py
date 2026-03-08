@@ -5,6 +5,14 @@ A data strucutre holding indices for various columns of a table. Key column shou
 import os
 import pickle
 
+#Do we need these imports? -> 
+import threading
+from lstore.disk import Disk
+from lstore.bufferpool import BUFFERPOOL
+from lstore.record_info import RID
+import lstore.config as Config
+
+
 class Index:
 
     def __init__(self, table):
@@ -13,9 +21,13 @@ class Index:
 
         #init table
         self.table = table
+
+        #I think I want to implement a locking mechanism with Rlock
         #create index for primary key
         if table.key is not None:
            self.create_index(table.key)
+
+        self.lock = threading.RLock()
 
         # fix where we need to create index for all columns? instead of just the primary key -> EDIT FOR M2: secondary indexes created by the create_index method so I think we won't need this
         #for i in range(table.num_columns):
@@ -26,23 +38,21 @@ class Index:
     """
 
     def locate(self, column, value):
-        #Check if an index actually exists for this column.
-        # If not -> return an empty list to prevent crashing.
-        if self.indices[column] is None:
-            return []
-
-        rids = self.indices[column].get(value, set())
-        # Filter out deleted records (using the logic you added)
-        valid_rids = [rid for rid in rids if rid not in self.table.deleted]
-        return list(valid_rids)
+        with self.lock: # Protect read access
+            if self.indices[column] is None:
+                return []
+            rids = self.indices[column].get(value, set())
+            valid_rids = [rid for rid in rids if rid not in self.table.deleted]
+            return list(valid_rids)
 
     """
     # Returns the RIDs of all records with values in column "column" between "begin" and "end"
     """
 
     def locate_range(self, begin, end, column):
-        if self.indices[column] is None:
-            return []
+        with self.lock:
+            if self.indices[column] is None:
+                return []
 
         rids = []
         #hashmap because its in-place
@@ -65,15 +75,17 @@ class Index:
 
     def create_index(self, column_number):
         # Initialize the index dictionary if it doesn't exist
-        if self.indices[column_number] is None:
-            self.indices[column_number] = {}
+        with self.lock:
+            if self.indices[column_number] is None:
+                self.indices[column_number] = {}
             
         # Iterate through all records currently in the table to populate the index
         # We only index Base RIDs as they represent the logical record
-        for rid in self.table.page_directory:
-            # Skip records that are marked as deleted
-            if rid in self.table.deleted:
-                continue
+            for rid, meta in self.table.page_directory.items():
+                is_tail = meta[1]
+                if not is_tail and rid not in self.table.deleted:
+                    latest_values = self.table.latest_cols(rid)
+                    self.add_entry(column_number, rid, latest_values[column_number])
                 
             # We only care about base records (tail records are part of base record history)
             # In page_directory, index 1 of tuple is 'is_tail'
@@ -97,31 +109,29 @@ class Index:
         self.indices[column_number] = None
 
 #helper functions: (we need them because otherwise data doesn't enter into the index)
+    # should we move these into a new file?
     def add_entry(self, column_number, rid, value):
-        if self.indices[column_number] is None: return
-        if value not in self.indices[column_number]:
-            self.indices[column_number][value] = set()
-        self.indices[column_number][value].add(rid)
+        with self.lock:
+            if self.indices[column_number] is None: return
+            if value not in self.indices[column_number]:
+                self.indices[column_number][value] = set()
+            self.indices[column_number][value].add(rid)
 
     def remove_entry(self, column_number, rid, value):
-        if self.indices[column_number] is None: 
-            return
+        with self.lock:
+            if self.indices[column_number] is None: 
+                return
             #Check if the value exists in the index
-        if value in self.indices[column_number]:
-            #Check if the RID is missing
-            self.indices[column_number][value].discard(rid)
-            #Optimization: If the set is empty, delete the key entirely to save memory -> should help with efficiency
-            if not self.indices[column_number][value]:
-                del self.indices[column_number][value]
+            if value in self.indices[column_number]:
+                self.indices[column_number][value].discard(rid)
+                if not self.indices[column_number][value]:
+                    del self.indices[column_number][value]
 
     def update_entry(self, column_number, rid, old_value, new_value):
-       #If value didn't actually change -> nothing
-        if old_value == new_value: 
-            return
-            #Remove RID from old value
-        self.remove_entry(column_number, rid, old_value)
-        #Add RID to new value
-        self.add_entry(column_number, rid, new_value)
+       with self.lock:
+            if old_value == new_value: return
+            self.remove_entry(column_number, rid, old_value)
+            self.add_entry(column_number, rid, new_value)
 
 #Milestone 2 Additions
 #----------------------
@@ -139,3 +149,6 @@ class Index:
                 self.indices = pickle.load(file)
             return True
         return False
+
+
+#Milestone 3 
