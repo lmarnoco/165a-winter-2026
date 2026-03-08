@@ -11,7 +11,7 @@ class TransactionWorker:
     # Creates a transaction worker object.
     """
     def __init__(self, transactions = []):
-        self.lock_manager = LockManager
+        self.lock_manager = LockManager()
         self.stats = []
         self.transactions = transactions
         self.result = 0

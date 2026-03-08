@@ -25,6 +25,10 @@ class LockManager():
 
             if type == "S" and record["mode"] == "S":
                 can_grant = True
+            elif type == "X" and record["transactions_held"] == {transaction}:
+                record["mode"] = "X"
+                transaction.held_locks.append((self, rid))  
+                return True
             elif not record["transactions_held"]:
                 can_grant = True
             
@@ -49,6 +53,7 @@ class LockManager():
 
             if not record["transactions_held"]:
                 record["mode"] = None
+                del self.lock_table[rid]
             
             return True
 
