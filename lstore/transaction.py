@@ -17,6 +17,7 @@ class Transaction:
         self.undo_log = []
         self.status = "PENDING"
         self.active_tables = [] 
+        self.lock_manager = LockManager()
         pass
 
     """
@@ -98,7 +99,7 @@ class Transaction:
         return True
 
     def _release_all_locks(self):
-        for lock_info, rid in self.held_locks:
+        for lock_info, rid in list(dict.fromkeys(self.held_locks)):  
             try: 
                 lock_info.unlock(rid, self)
             except Exception:

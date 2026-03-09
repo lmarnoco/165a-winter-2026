@@ -34,11 +34,16 @@ class Index:
     """
 
     def locate(self, column, value):
-        with self.lock: # Protect read access
-            if self.indices[column] is None:
-                return []
-            rids = self.indices[column].get(value, set())
-            valid_rids = [rid for rid in rids if rid not in self.table.deleted]
+        with self.table.table_lock:    
+            with self.lock: # Protect read access
+                if self.indices[column] is None:
+                    return []
+                rids = list(self.indices[column].get(value, set()))
+
+            deleted = set(self.table.deleted)
+
+            valid_rids = [rid for rid in rids if rid not in deleted]
+            
             return list(valid_rids)
 
     """
@@ -46,22 +51,24 @@ class Index:
     """
 
     def locate_range(self, begin, end, column):
-        with self.lock:
-            if self.indices[column] is None:
-                return []
+        with self.table.table_lock:
+            with self.lock:
+                if self.indices[column] is None:
+                    return []
 
-        rids = []
-        #hashmap because its in-place
-        #Milestone 2 -> Hashmap stil valid, but needs to be altered in order to account for keys other than the primary one.
-        # index_map = self.indices[column]
-        items = list(self.indices[column].items())
+                #hashmap because its in-place
+                #Milestone 2 -> Hashmap stil valid, but needs to be altered in order to account for keys other than the primary one.
+                # index_map = self.indices[column]
+                items = list(self.indices[column].items())
+            deleted = set(self.table.deleted)
         
+        rids = []
         #iterate over all keys in index & check range
         for key, val_rids in items:
             if begin <= key <= end:
                 rids.extend(val_rids)
         
-        rids = [rid for rid in rids if rid not in self.table.deleted]
+        rids = [rid for rid in rids if rid not in deleted]
                 
         return rids
         
@@ -70,6 +77,31 @@ class Index:
     # optional: Create index on specific column
     """
 
+    # Saee - Im going to try out a different more mininal version for create_index because it keeps crashing right now? 
+    # commented out the current version and replaced it with new code and some of the og. code
+    def create_index(self, column_number):
+        with self.lock:
+            self.indices[column_number] = {}
+        
+        table_lock = getattr(self.table, "table_lock", None)
+        if table_lock is None:
+            base_rids = [
+                rid for rid, meta in self.table.page_directory.items()
+                if (not meta[1]) and (rid not in self.table.deleted)
+            ]
+        else:
+            with table_lock:
+                base_rids = [
+                    rid for rid, meta in self.table.page_directory.items()
+                    if (not meta[1]) and (rid not in self.table.deleted)
+                ]
+
+        for rid in base_rids:
+            latest_values = self.table.latest_cols(rid)
+            self.add_entry(column_number, rid, latest_values[column_number])
+
+
+    """
     def create_index(self, column_number):
         # Initialize the index dictionary if it doesn't exist
         with self.lock:
@@ -98,6 +130,7 @@ class Index:
                 
                 # Add the entry to the newly created index
                 self.add_entry(column_number, rid, column_value)
+    """
     #what function to call to iterate over existing records? -> need this from table.py
 
     

@@ -7,13 +7,18 @@ import time
 
 class TransactionWorker:
 
+    # idea to is to make all the workers share one lock table 
+    shared_lock_manager = LockManager()  
+
     """
     # Creates a transaction worker object.
     """
-    def __init__(self, transactions = []):
-        self.lock_manager = LockManager()
+    def __init__(self, transactions = None, lock_manager = None):
+        self.lock_manager = lock_manager or TransactionWorker.shared_lock_manager   # added this implementation instead
         self.stats = []
         self.transactions = list(transactions) if transactions is not None else []
+        for t in self.transactions:    # I think adding this shared worker should help manage any conflicts? 
+            t.lock_manager = self.lock_manager 
         self.result = 0
         self._thread = None
         pass

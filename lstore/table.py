@@ -68,9 +68,13 @@ class PageRange:
         return pageset_id, slot
 
     def alloc_tail_slot(self):
+        # added guard here --> have at least one tail pageset if none of them load in
+        if not self.tail_pageset_counts:
+            self._add_tail_pageset()
         """Allocate a slot in the current tail pageset. Returns (pageset_id, slot)."""
         if self.tail_pageset_counts[-1] >= 512:
             self._add_tail_pageset()
+
         pageset_id = self.num_tail_pagesets - 1
         slot = self.tail_pageset_counts[pageset_id]
         self.tail_pageset_counts[pageset_id] += 1
@@ -95,7 +99,6 @@ class Table:
         self.key = key
         self.num_columns = num_columns
         self.page_directory: dict[int, tuple[int, bool, int, int]] = {}
-        self.index = Index(self)
         self.page_ranges: list[PageRange] = []
         self.total_columns = 4 + num_columns
         self.base_indirection: dict[int, int] = {}
@@ -104,9 +107,12 @@ class Table:
         self.next_rid = 1                          
         self.page_ranges.append(PageRange(num_columns))
 
+        self.table_lock = threading.RLock()
+
+        self.index = Index(self)
+
         # merging stuff
         self.tailtobase_merge: dict[int, int] = {}    # this is for tail RID to base RID linking 
-        self.table_lock = threading.RLock()
         self.merge_queue = queue.Queue()
         self.stop_merge = threading.Event()
         self.merge_thread = None
@@ -199,12 +205,12 @@ class Table:
             pr.updates_postmerge = 0
             pr.base_tps = []
 
-            num_base = base_shape.get(r, -1) + 1
+            num_base = max(1, base_shape.get(r, -1) + 1)
             pr.num_base_pagesets = num_base
             pr.base_pageset_counts = [base_counts.get((r, ps), 0) for ps in range(num_base)]
             pr.base_tps = [INVALID_RID] * num_base
 
-            num_tail = tail_shape.get(r, -1) + 1
+            num_tail = max(1, tail_shape.get(r, -1) + 1)
             pr.num_tail_pagesets = num_tail
             pr.tail_pageset_counts = [tail_counts.get((r, ps), 0) for ps in range(num_tail)]
 
@@ -596,17 +602,17 @@ class Table:
 
     # more records functions 
 
-    def insert_base_record(self, cols: list[int]):
+    def insert_base_record(self, cols: list[int], transaction = None):
         
         if len(cols) != self.num_columns:
             raise ValueError("wrong no. of columns")
 
         key_val = cols[self.key]
-        if len(self.index.locate(self.key, key_val)) > 0:
-            raise ValueError("there's a duplicate primary key?")
 
-        
         with self.table_lock:
+            if len(self.index.locate(self.key, key_val)) > 0:
+                raise ValueError("there's a duplicate primary key?")
+
             base_rid = self.get_RID()
 
             curr_time = int(time())
@@ -622,14 +628,20 @@ class Table:
             self.write_record(is_tail = False, values = values)
             self.base_indirection[base_rid] = INVALID_RID
             self.base_schema[base_rid] = 0  #not sure how to handle this 
+
+            if transaction is not None:
+                if not transaction.lock_manager.lock(transaction, base_rid, "X"):
+                    self.deleted.add(base_rid)
+                    self.base_indirection[base_rid] = DELETED_INDIRECTION
+                    self.base_schema.pop(base_rid, None)
+                    raise RuntimeError("fail to lock new RID")
        
-        self.index.add_entry(self.key, base_rid, key_val)
-        
-        
-        for c in range(self.num_columns):
-            if c == self.key: # skip since self.key has already been inserted above
-                continue
-            self.index.add_entry(c, base_rid, values[4 + c])
+            self.index.add_entry(self.key, base_rid, key_val)
+            
+            for c in range(self.num_columns):
+                if c == self.key: # skip since self.key has already been inserted above
+                    continue
+                self.index.add_entry(c, base_rid, values[4 + c])
 
         return base_rid
 
@@ -658,70 +670,106 @@ class Table:
             }
 
         copy_rid = None
+        tail_rid = None
+        base_range_id = None
+        old_tail_rid = INVALID_RID
+        old_schema = 0
+        old_values = None
+        applied_index_cols = []
+        merge_scheduled = False
 
-        with self.table_lock:
-            base_range_id = self.get_base_range(base_rid)
+        # Added a try except block around the whole update so that partial updates cannot leak.
+        try: 
+            with self.table_lock:
+                base_range_id = self.get_base_range(base_rid)
 
-            curr_vals = self.latest_cols(base_rid)
-            old_values = curr_vals.copy()
-            old_schema = self.base_schema.get(base_rid, 0)
-            old_tail_rid = self.base_indirection.get(base_rid, INVALID_RID)
+                curr_vals = self.latest_cols(base_rid)
+                old_values = curr_vals.copy()
+                old_schema = self.base_schema.get(base_rid, 0)
+                old_tail_rid = self.base_indirection.get(base_rid, INVALID_RID)
 
-            prev_rid = old_tail_rid if old_tail_rid != INVALID_RID else base_rid
-            curr_time = int(time())
+                prev_rid = old_tail_rid if old_tail_rid != INVALID_RID else base_rid
+                curr_time = int(time())
 
-            if old_tail_rid == INVALID_RID:
-                copy_rid = self.get_RID()
-                copy_vals = [0] * self.total_columns
-                copy_vals[INDIRECTION_COLUMN] = base_rid
-                copy_vals[RID_COLUMN] = copy_rid
-                copy_vals[TIMESTAMP_COLUMN] = curr_time
-                copy_vals[SCHEMA_ENCODING_COLUMN] = (1 << self.num_columns) - 1
-                copy_vals[4:] = curr_vals.copy()
+                if old_tail_rid == INVALID_RID:
+                    copy_rid = self.get_RID()
+                    copy_vals = [0] * self.total_columns
+                    copy_vals[INDIRECTION_COLUMN] = base_rid
+                    copy_vals[RID_COLUMN] = copy_rid
+                    copy_vals[TIMESTAMP_COLUMN] = curr_time
+                    copy_vals[SCHEMA_ENCODING_COLUMN] = (1 << self.num_columns) - 1
+                    copy_vals[4:] = curr_vals.copy()
 
-                self.write_record(is_tail=True, values=copy_vals, target_range_id=base_range_id)
-                self.tailtobase_merge[copy_rid] = base_rid
-                prev_rid = copy_rid
+                    self.write_record(is_tail=True, values=copy_vals, target_range_id=base_range_id)
+                    self.tailtobase_merge[copy_rid] = base_rid
+                    prev_rid = copy_rid
 
-            tail_rid = self.get_RID()
+                tail_rid = self.get_RID()
 
-            new_vals = curr_vals.copy()
+                new_vals = curr_vals.copy()
+                for col_id, val in update_cols.items():
+                    new_vals[col_id] = int(val)
+
+                new_schema = old_schema
+                for col_id in update_cols.keys():
+                    new_schema |= (1 << col_id)
+
+                values = [0] * self.total_columns
+                values[INDIRECTION_COLUMN] = prev_rid
+                values[RID_COLUMN] = tail_rid
+                values[TIMESTAMP_COLUMN] = curr_time
+                values[SCHEMA_ENCODING_COLUMN] = new_schema
+                values[4:] = new_vals
+
+                self.write_record(is_tail=True, values=values, target_range_id=base_range_id)
+
+                self.tailtobase_merge[tail_rid] = base_rid
+                self.base_indirection[base_rid] = tail_rid
+                self.base_schema[base_rid] = new_schema
+
+            self.schedule_merge(base_range_id)
+            merge_scheduled = True
+
             for col_id, val in update_cols.items():
-                new_vals[col_id] = int(val)
+                if col_id == self.key:
+                    continue
+                self.index.update_entry(col_id, base_rid, old_values[col_id], int(val))
+                applied_index_cols.append(col_id)
 
-            new_schema = old_schema
-            for col_id in update_cols.keys():
-                new_schema |= (1 << col_id)
+            return {
+                "tail_rid": tail_rid,
+                "copy_rid": copy_rid,
+                "base_range_id": base_range_id,
+                "old_tail_rid": old_tail_rid,
+                "old_schema": old_schema,
+                "old_values": old_values,
+                "update_cols": update_cols.copy()
+            }
+        
+        except Exception:
+            if old_values is not None:
+                for col_id in reversed(applied_index_cols):
+                    try:
+                        self.index.update_entry(col_id, base_rid, int(update_cols[col_id]), old_values[col_id])
+                    except Exception:
+                        pass
 
-            values = [0] * self.total_columns
-            values[INDIRECTION_COLUMN] = prev_rid
-            values[RID_COLUMN] = tail_rid
-            values[TIMESTAMP_COLUMN] = curr_time
-            values[SCHEMA_ENCODING_COLUMN] = new_schema
-            values[4:] = new_vals
+            # The metadata should be restored to pre-update pointers state when stuff fails
+            with self.table_lock:
+                if base_rid in self.page_directory and base_rid not in self.deleted:
+                    self.base_indirection[base_rid] = old_tail_rid
+                    self.base_schema[base_rid] = old_schema
 
-            self.write_record(is_tail=True, values=values, target_range_id=base_range_id)
+                if tail_rid is not None:
+                    self.tailtobase_merge.pop(tail_rid, None)
+                if copy_rid is not None:
+                    self.tailtobase_merge.pop(copy_rid, None)
 
-            self.tailtobase_merge[tail_rid] = base_rid
-            self.base_indirection[base_rid] = tail_rid
-            self.base_schema[base_rid] = new_schema
+                if merge_scheduled and base_range_id is not None and 0 <= base_range_id < len(self.page_ranges):
+                    pr = self.page_ranges[base_range_id]
+                    pr.updates_postmerge = max(0, pr.updates_postmerge - 1)
 
-        self.schedule_merge(base_range_id)
-
-        for col_id, val in update_cols.items():
-            if col_id == self.key:
-                continue
-            self.index.update_entry(col_id, base_rid, old_values[col_id], int(val))
-
-        return {
-            "tail_rid": tail_rid,
-            "copy_rid": copy_rid,
-            "base_range_id": base_range_id,
-            "old_tail_rid": old_tail_rid,
-            "old_schema": old_schema,
-            "old_values": old_values,
-            "update_cols": update_cols.copy()
-        }
+            raise
 
 
     def read_record(self, base_rid: int, projected_cols: list[int]):
@@ -774,7 +822,7 @@ class Table:
                 except Exception:
                     pass
             raise
-        
+
         
         return {
             "old_values": old_vals,

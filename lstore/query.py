@@ -25,6 +25,7 @@ class Query:
         
         locations = self.table.index.locate(self.table.key, primary_key)
         success = False
+        seen = set()
 
         #Add Lock Check  later
         if len(locations) <= 0:
@@ -32,10 +33,25 @@ class Query:
         
         
         for RID in locations:
+            if RID in seen:
+                continue
+            seen.add(RID)
+
             if transaction is not None:
-                ids = self.table.delete_context(RID)
-                if ids is None:
+                locked_aquired = transaction.lock_manager.lock(transaction, RID, "X")
+                if not locked_aquired:
                     return False
+            
+            # removed the try except from the bottom and added the logic here instead
+            try:
+                ids = self.table.delete_context(RID)
+            except Exception:
+                return False
+
+            if ids is None:
+                return False
+
+            if transaction is not None: 
                 transaction.add_undo(
                     self.table.rollback_delete, 
                     RID, 
@@ -43,15 +59,9 @@ class Query:
                     ids["old_schema"],
                     ids["old_values"],
                 )
-                locked_aquired = transaction.lock_manager.lock(transaction, RID, "X")
-                if not locked_aquired:
-                    return False
+                
 
-            if self.table.delete(RID):
-                success = True
-            else:
-                if self.table.delete(RID):
-                    success = True
+            success = True
         
         return success
 
@@ -67,15 +77,12 @@ class Query:
         key_val = columns[self.table.key]
 
         if transaction is not None:
-            if not transaction.lock_manager.lock(transaction, key_val, "X"):
+            pk_lock_id = ("PK", self.table.name, int(key_val))
+            if not transaction.lock_manager.lock(transaction, pk_lock_id, "X"):
                 return False
-
-        #If insert_base_record fails 
-        if len(self.table.index.locate(self.table.key, key_val)) > 0:
-            return False
         
         try: 
-            base_rid = self.table.insert_base_record(columns)
+            base_rid = self.table.insert_base_record(columns, transaction = transaction)
             if transaction is not None:
                 transaction.add_undo(self.table.rollback_insert, base_rid, list(columns))
             return True
@@ -98,10 +105,14 @@ class Query:
         if self.table.index.indices[search_key_index] is not None:
             rids_list = self.table.index.locate(search_key_index, search_key)
         else:
+            with self.table.table_lock:
+                items = list(self.table.page_directory.items())
+                deleted = set(self.table.deleted)
+
             rids_list = []
-            for rid, meta in self.table.page_directory.items():
+            for rid, meta in items:
                 is_tail = meta[1]
-                if is_tail or rid in self.table.deleted:
+                if is_tail or rid in deleted:
                     continue
 
                 latest_val = self.table.latest_cols(rid)[search_key_index]
@@ -152,14 +163,23 @@ class Query:
 
         if search_key_index == self.table.key and self.table.index.indices[search_key_index] is not None:
             rids_list = self.table.index.locate(search_key_index, search_key)
+            with self.table.table_lock:
+                deleted = set(self.table.deleted)
         else:
+            with self.table.table_lock:
+                items = list(self.table.page_directory.items())
+                deleted = set(self.table.deleted)
+
             rids_list = []
-            for rid, meta in self.table.page_directory.items():
+            for rid, meta in items:
                 is_tail = meta[1]
-                if is_tail or rid in self.table.deleted:
+                if is_tail or rid in deleted:
                     continue
 
                 rids_list.append(rid)
+
+        if not rids_list:
+            return []
 
         result = []
         seen = set()
@@ -173,7 +193,7 @@ class Query:
 
             seen.add(base_rid)
 
-            if base_rid in self.table.deleted:
+            if base_rid in deleted:
                 continue
 
             if transaction is not None:
