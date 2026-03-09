@@ -87,7 +87,12 @@ class Database():
         # If the table already exists, don't create a new one, just return the existing one 
         if name in self.tables:
             return self.tables[name]
-        
+
+        # make sure first that the bufferpool actually exsits --> atomic? 
+        if self.bufferpool is None: 
+            default = self.path if self.path is not None else "."
+            self.bufferpool = BufferPool(capacity = self.bufferpool_capacity, path = default)
+
         # Create new table object with passed parameters
         table = Table(name, num_columns, key_index, merge_threshold=self.merge_threshold)
 

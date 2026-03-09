@@ -10,11 +10,12 @@ class TransactionWorker:
     """
     # Creates a transaction worker object.
     """
-    def __init__(self, transactions = []):
-        self.lock_manager = LockManager
+    def __init__(self, transactions = None):
+        self.lock_manager = LockManager()
         self.stats = []
-        self.transactions = transactions
+        self.transactions = list(transactions) if transactions is not None else []
         self.result = 0
+        self._thread = None
         pass
 
     

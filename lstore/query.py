@@ -32,8 +32,21 @@ class Query:
         
         
         for RID in locations:
-            if self.table.delete(RID):
+            if transaction is not None:
+                ids = self.table.delete_context(RID)
+                if ids is None:
+                    return False
+                transaction.add_undo(
+                    self.table.rollback_delete, 
+                    RID, 
+                    ids["old_indirection"],
+                    ids["old_schema"],
+                    ids["old_values"],
+                )
                 success = True
+            else:
+                if self.table.delete(RID):
+                    success = True
         
         return success
 
@@ -52,7 +65,9 @@ class Query:
             return False
         
         try: 
-            self.table.insert_base_record(columns)
+            base_rid = self.table.insert_base_record(columns)
+            if transaction is not None:
+                transaction.add_undo(self.table.rollback_insert, base_rid, list(columns))
             return True
         except Exception:
             return False
@@ -203,7 +218,19 @@ class Query:
         rid = rids_list[0]
 
         try:  # put the action in a try except so that if table returns error it doesn't crash? 
-            self.table.update_tail_record(rid, update_columns)
+            updates = self.table.update_tail_record(rid, update_columns)
+            if transaction is not None: 
+                transaction.add_undo(
+                    self.table.rollback_update,
+                    rid,
+                    updates["old_tail_rid"], 
+                    updates["old_schema"],
+                    updates["update_cols"],
+                    updates["old_values"],
+                    updates["tail_rid"],
+                    updates["copy_rid"],
+                    updates["base_range_id"],
+                )
             return True
         except Exception:
             return False
@@ -304,7 +331,7 @@ class Query:
     def increment(self, key, column, transaction=None):
         self.table.publish_merge()
 
-        result = self.select(key, self.table.key, [1] * self.table.num_columns)
+        result = self.select(key, self.table.key, [1] * self.table.num_columns, transaction = transaction)
         if result is False or not result:
             return False
 
@@ -312,5 +339,5 @@ class Query:
         updated_columns = [None] * self.table.num_columns
         updated_columns[column] = r.columns[column] + 1
 
-        result = self.update(key, *updated_columns)
+        result = self.update(key, *updated_columns, transaction = transaction)
         return result
