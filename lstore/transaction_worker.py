@@ -13,8 +13,9 @@ class TransactionWorker:
     def __init__(self, transactions = []):
         self.lock_manager = LockManager()
         self.stats = []
-        self.transactions = transactions
+        self.transactions = list(transactions) if transactions is not None else []
         self.result = 0
+        self._thread = None
         pass
 
     

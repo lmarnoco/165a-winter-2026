@@ -71,16 +71,58 @@ class BufferPool:
                     frame['dirty'] = False
 
 
+    def install_pages_all(self, pages: dict, dirty: bool = True):
+        with self._lock:
+            target_pids = set(pages.keys())
+
+            for pid in target_pids: 
+                frame = self.frames.get(pid)
+                if frame is not None and frame["pin"] >0:
+                    return False
+            
+            needed = 0
+            for pid in target_pids:
+                if pid not in self.frames:
+                    needed += 1
+            free_slots = self.capacity - len(self.frames)
+
+            if needed > free_slots:
+                evict = needed - free_slots
+                candidates = []
+
+                for pid in self.lru.keys():
+                    if pid not in target_pids and self.frames[pid]["pin"] == 0:
+                        candidates.append(pid)
+                if len(candidates) < evict: 
+                    return False
+                
+                for each in candidates[:evict]:
+                    if self.frames[each]["dirty"]:
+                        self._write_to_disk(each, self.frames[each]["page"])
+                    del self.frames[each]
+                    del self.lru[each]
+            
+            for pid, page in pages.items():
+                if pid in self.frames:
+                    self.frames[pid]["page"] = page
+                    self.frames[pid]["dirty"] = self.frames[pid]["dirty"] or dirty
+                    self.lru.move_to_end(pid)
+                else: 
+                    self.frames[pid] = {"page": page, "dirty": dirty, "pin": 0}
+                    self.lru[pid] = None
+
+            return True 
+
 
     def _evict(self):
         # first pass: evict clean unpinned pages
-        for pid in self.lru:
+        for pid in list(self.lru.keys()):
             if self.frames[pid]['pin'] == 0 and not self.frames[pid]['dirty']:
                 del self.frames[pid]
                 del self.lru[pid]
                 return
         # second pass: evict dirty unpinned pages
-        for pid in self.lru:
+        for pid in list(self.lru.keys()):
             if self.frames[pid]['pin'] == 0:
                 self._write_to_disk(pid, self.frames[pid]['page'])
                 del self.frames[pid]

@@ -4,14 +4,9 @@ A data strucutre holding indices for various columns of a table. Key column shou
 
 import os
 import pickle
-
-#Do we need these imports? -> 
 import threading
-from lstore.disk import Disk
-from lstore.bufferpool import BUFFERPOOL
-from lstore.record_info import RID
-import lstore.config as Config
 
+# took out some not needed imports? - saee
 
 class Index:
 
@@ -19,6 +14,8 @@ class Index:
         # One index for each table. All our empty initially.
         self.indices = [None] *  table.num_columns
 
+        self.lock = threading.RLock()
+        
         #init table
         self.table = table
 
@@ -27,7 +24,6 @@ class Index:
         if table.key is not None:
            self.create_index(table.key)
 
-        self.lock = threading.RLock()
 
         # fix where we need to create index for all columns? instead of just the primary key -> EDIT FOR M2: secondary indexes created by the create_index method so I think we won't need this
         #for i in range(table.num_columns):
@@ -57,10 +53,11 @@ class Index:
         rids = []
         #hashmap because its in-place
         #Milestone 2 -> Hashmap stil valid, but needs to be altered in order to account for keys other than the primary one.
-        index_map = self.indices[column]
+        # index_map = self.indices[column]
+        items = list(self.indices[column].items())
         
         #iterate over all keys in index & check range
-        for key, val_rids in index_map.items():
+        for key, val_rids in items:
             if begin <= key <= end:
                 rids.extend(val_rids)
         
@@ -78,6 +75,8 @@ class Index:
         with self.lock:
             if self.indices[column_number] is None:
                 self.indices[column_number] = {}
+            else:
+                self.indices[column_number].clear()
             
         # Iterate through all records currently in the table to populate the index
         # We only index Base RIDs as they represent the logical record
@@ -89,6 +88,8 @@ class Index:
                 
             # We only care about base records (tail records are part of base record history)
             # In page_directory, index 1 of tuple is 'is_tail'
+
+            # DO WE NEED THIS PART? --> Shoudn't we only rebuild from the base records? 
             is_tail = self.table.page_directory[rid][1]
             if not is_tail:
                 # Retrieve the latest values to ensure index accuracy
@@ -106,7 +107,8 @@ class Index:
     """
 
     def drop_index(self, column_number):
-        self.indices[column_number] = None
+        with self.lock:
+            self.indices[column_number] = None
 
 #helper functions: (we need them because otherwise data doesn't enter into the index)
     # should we move these into a new file?
