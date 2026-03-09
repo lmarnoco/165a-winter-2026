@@ -29,7 +29,7 @@ class LockManager():
                 record["mode"] = "X"
                 transaction.held_locks.append((self, rid))  
                 return True
-            elif not record["transactions_held"]:
+            elif not record["transactions_held"]:   
                 can_grant = True
             
             if can_grant:

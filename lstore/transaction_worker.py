@@ -22,7 +22,7 @@ class TransactionWorker:
     Appends t to transactions
     """
     def add_transaction(self, t):
-        t.lock_manager= self.lock_manager
+        t.lock_manager = self.lock_manager
         self.transactions.append(t)
 
         

@@ -32,6 +32,11 @@ class Query:
         
         
         for RID in locations:
+            if transaction is not None:
+                locked_aquired = transaction.lock_manager.lock(transaction, RID, "X")
+                if not locked_aquired:
+                    return False
+
             if self.table.delete(RID):
                 success = True
         
@@ -47,6 +52,11 @@ class Query:
         self.table.publish_merge()
 
         key_val = columns[self.table.key]
+
+        if transaction is not None:
+            if not transaction.lock_manager.lock(transaction, key_val, "X"):
+                return False
+
         #If insert_base_record fails 
         if len(self.table.index.locate(self.table.key, key_val)) > 0:
             return False
@@ -95,6 +105,10 @@ class Query:
             if rid in seen_list:
                 continue
             seen_list.add(rid)
+
+            if transaction is not None:
+                if not transaction.lock_manager.lock(transaction, rid, "S"):
+                    return False
 
             record = self.table.read_record(rid, projected_columns_index)
             if record is not None:
@@ -146,6 +160,10 @@ class Query:
 
             if base_rid in self.table.deleted:
                 continue
+
+            if transaction is not None:
+                if not transaction.lock_manager.lock(transaction, base_rid, "S"):
+                    return False
 
             past_rid = self.table.get_previous_rid(base_rid, steps_back)
 
@@ -202,6 +220,10 @@ class Query:
         #Expect 1
         rid = rids_list[0]
 
+        if transaction is not None:
+            if not transaction.lock_manager.lock(transaction, rid, "X"):
+                return False
+
         try:  # put the action in a try except so that if table returns error it doesn't crash? 
             self.table.update_tail_record(rid, update_columns)
             return True
@@ -233,13 +255,23 @@ class Query:
                 rids_list.append(rid_or_list)
 
         rids_list = [rid for rid in rids_list if rid not in self.table.deleted]
+        seen = set()
 
         if len(rids_list) == 0:
             return False
 
         #Could change later
         result = 0
-        for rids in rids_list:
+        for rids in rids_list: 
+            
+            if rids in seen:
+                continue
+            seen.add(rids)
+
+            if transaction is not None:
+                if not transaction.lock_manager.lock(transaction, rids, "S"):
+                    return False
+        
             latest_rid = self.table.latest_cols(rids)
             result += latest_rid[aggregate_column_index]
 
@@ -274,7 +306,8 @@ class Query:
         rids_list = [rid for rid in rids_list if rid not in self.table.deleted]
 
         result = 0
-        
+        seen = set()
+
         if len(rids_list) == 0:
             return False
         
@@ -286,6 +319,15 @@ class Query:
                 steps_back = relative_version
 
             past_rids = self.table.get_previous_rid(rids, steps_back)
+
+            if past_rids in seen:
+                continue
+            seen.add(past_rids)
+
+            if transaction is not None:
+                if not transaction.lock_manager.lock(transaction, past_rids, "S"):
+                    return False
+                
             val = self.table.read_val(past_rids, 4 + aggregate_column_index)
             result += val
         
@@ -309,8 +351,19 @@ class Query:
             return False
 
         r = result[0]
+
+        rid = self.table.index.locate(self.table.key, key)
+        if not rid:
+            return False
+        
+        real_rid = rid[0]
+
+        if transaction is not None:
+            if not transaction.lock_manager.lock(transaction, real_rid, "X"):
+                return False
+                
         updated_columns = [None] * self.table.num_columns
         updated_columns[column] = r.columns[column] + 1
 
-        result = self.update(key, *updated_columns)
+        result = self.update(key, *updated_columns, transaction=transaction)
         return result
