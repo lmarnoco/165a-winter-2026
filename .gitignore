@@ -1,1 +1,17 @@
 personal_test.py
+lstore/__pycache__/__init__.cpython-313.pyc
+lstore/__pycache__/bufferpool.cpython-313.pyc
+lstore/__pycache__/db.cpython-313.pyc
+lstore/__pycache__/lock_manager.cpython-313.pyc
+lstore/__pycache__/index.cpython-313.pyc
+lstore/__pycache__/query.cpython-313.pyc
+lstore/__pycache__/page.cpython-313.pyc
+lstore/__pycache__/table.cpython-313.pyc
+lstore/__pycache__/transaction_worker.cpython-313.pyc
+lstore/__pycache__/transaction.cpython-313.pyc
+lstore/__pycache__/table.cpython-313.pyc
+lstore/__pycache__/query.cpython-313.pyc
+lstore/__pycache__/page.cpython-313.pyc
+lstore/__pycache__/index.cpython-313.pyc
+lstore/__pycache__/db.cpython-313.pyc
+lstore/__pycache__/__init__.cpython-313.pyc

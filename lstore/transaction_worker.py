@@ -10,7 +10,7 @@ class TransactionWorker:
     """
     # Creates a transaction worker object.
     """
-    def __init__(self, transactions = None):
+    def __init__(self, transactions = []):
         self.lock_manager = LockManager()
         self.stats = []
         self.transactions = list(transactions) if transactions is not None else []
@@ -23,7 +23,7 @@ class TransactionWorker:
     Appends t to transactions
     """
     def add_transaction(self, t):
-        t.lock_manager= self.lock_manager
+        t.lock_manager = self.lock_manager
         self.transactions.append(t)
 
         
