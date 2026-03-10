@@ -75,11 +75,26 @@ class BufferPool:
         with self._lock:
             target_pids = set(pages.keys())
 
+            # don't overwrite any of the target pages that are currently pinned 
             for pid in target_pids: 
                 frame = self.frames.get(pid)
                 if frame is not None and frame["pin"] >0:
                     return False
             
+            # added a fix here 
+            # if the merge batch is actually bigger than the bufferpool capacity, the memory install 
+            # would be kind of impossible --> idea to do writethrough for the uncached pages? 
+            if len(target_pids) > self.capacity:
+                for pid, page in pages.items():
+                    frame = self.frames.get(pid)
+                    if frame is not None:
+                        frame["page"] = page
+                        frame["dirty"] = frame["dirty"] or dirty
+                        self.lru.move_to_end(pid)
+                    else:
+                        self._write_to_disk(pid, page)
+                return True
+
             needed = 0
             for pid in target_pids:
                 if pid not in self.frames:
