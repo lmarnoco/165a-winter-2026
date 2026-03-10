@@ -54,7 +54,7 @@ class TransactionWorker:
         for transaction in self.transactions:
             # each transaction returns True if committed or False if aborted
             retries = 0
-            while retries < 10:
+            while retries < 5:
                 # Reset transaction state for each attempt
                 transaction.undo_log = []
                 #transaction.held_locks = []
@@ -69,7 +69,7 @@ class TransactionWorker:
                     retries += 1
                     self.stats.append(False)
                     time.sleep(0)  # yield to other threads before retrying
-            if retries == 10:
+            if retries == 5:
                 print("Fail")
 
         self.result = len([s for s in self.stats if s])
