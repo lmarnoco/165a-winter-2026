@@ -153,7 +153,7 @@ class Table:
         # Since bufferpool.path == db_path and page files are named
         # tablename_range_side_pageset_col.pg, they land in the right place.
         #os.makedirs(table_dir, exist_ok=True)
-        self.publish_merge(wait = True)
+        self.publish_merge(wait = False)
 
         if self.bufferpool is not None:
             self.bufferpool.flush_all()

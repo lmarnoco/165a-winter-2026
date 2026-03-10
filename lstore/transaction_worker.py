@@ -50,6 +50,20 @@ class TransactionWorker:
             self._thread.join()
 
 
+# Saee - I'm adding a different version of this to try and fix the milestone 3 bug...
+# right now I think the while True loop is running forever because any aborted transactions are being retried forever 
+    def __run(self):
+        for transaction in self.transactions:
+            transaction.undo_log = []
+            transaction.held_locks = []
+            transaction.status = "PENDING"
+
+            result = transaction.run()
+            self.stats.append(bool(result))
+
+        self.result = sum(1 for s in self.stats if s)
+
+"""
     def __run(self):
         for transaction in self.transactions:
             # each transaction returns True if committed or False if aborted
@@ -69,4 +83,4 @@ class TransactionWorker:
                     time.sleep(0)  # yield to other threads before retrying
 
         self.result = len([s for s in self.stats if s])
-
+"""

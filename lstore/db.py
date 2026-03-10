@@ -1,5 +1,6 @@
 from lstore.table import Table
 import os # use path, mkdir, isdir
+import shutil
 from lstore.bufferpool import BufferPool
 
 class Database():
@@ -52,10 +53,10 @@ class Database():
         Close the database
         Later need to implement save function for tables and write to disk.
         """
-        for table in self.tables.values():
-            table.publish_merge(wait=True)
+        for table in list(self.tables.values()):
+            table.publish_merge(wait=False) # changed to False because we never want full shutdown??
 
-        for table in self.tables.values():
+        for table in list(self.tables.values()):
             table.stop_merge_thread()
 
         if self.path:
@@ -69,7 +70,7 @@ class Database():
                 self.bufferpool.flush_all()
         
             # Save metadata
-            for table in self.tables.values():
+            for table in list(self.tables.values()):
                 table._save_metadata(os.path.join(self.path, table.name))
         
             self._save_tables_meta()
@@ -84,15 +85,22 @@ class Database():
         :param key_index: int       #Index of table key in columns
 
         """
-        # If the table already exists, don't create a new one, just return the existing one 
-        if name in self.tables:
-            return self.tables[name]
 
         # make sure first that the bufferpool actually exsits --> atomic? 
         if self.bufferpool is None: 
             default = self.path if self.path is not None else "."
             self.bufferpool = BufferPool(capacity = self.bufferpool_capacity, path = default)
 
+         # If the table already exists, don't create a new one, just return the existing one 
+        if name in self.tables:
+            self.tables[name].stop_merge_thread()
+            del self.tables[name]
+       
+        if self.path is not None:
+            table_dir = os.path.join(self.path, name)
+            if os.path.isdir(table_dir):
+                shutil.rmtree(table_dir, ignore_errors=True)
+       
         # Create new table object with passed parameters
         table = Table(name, num_columns, key_index, merge_threshold=self.merge_threshold)
 
