@@ -33,12 +33,15 @@ class Index:
     # returns the location of all records with the given value on column "column"
     """
 
-    def locate(self, column, value):
+    def locate(self, column, value, include_deleted = False):
         with self.table.table_lock:    
             with self.lock: # Protect read access
                 if self.indices[column] is None:
                     return []
                 rids = list(self.indices[column].get(value, set()))
+
+            if include_deleted:
+                return list(rids)
 
             deleted = set(self.table.deleted)
 
@@ -50,7 +53,7 @@ class Index:
     # Returns the RIDs of all records with values in column "column" between "begin" and "end"
     """
 
-    def locate_range(self, begin, end, column):
+    def locate_range(self, begin, end, column,  include_deleted = False):
         with self.table.table_lock:
             with self.lock:
                 if self.indices[column] is None:
@@ -67,6 +70,9 @@ class Index:
         for key, val_rids in items:
             if begin <= key <= end:
                 rids.extend(val_rids)
+        
+        if include_deleted:
+            return rids
         
         rids = [rid for rid in rids if rid not in deleted]
                 

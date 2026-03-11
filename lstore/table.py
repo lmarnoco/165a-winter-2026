@@ -602,7 +602,7 @@ class Table:
 
     # more records functions 
 
-    def insert_base_record(self, cols: list[int], transaction = None):
+    def insert_base_record(self, cols: list[int], transaction = None, defer_index: bool = False):
         
         if len(cols) != self.num_columns:
             raise ValueError("wrong no. of columns")
@@ -631,23 +631,27 @@ class Table:
 
             if transaction is not None:
                 if not transaction.lock_manager.lock(transaction, base_rid, "X"):
+                    if hasattr(transaction, "mark_abort"):
+                        from lstore.transaction import Aborts
+                        transaction.mark_abort(Aborts.LOCK_CONFLICT, f"failed to lock new RID {base_rid}")
                     self.deleted.add(base_rid)
                     self.base_indirection[base_rid] = DELETED_INDIRECTION
                     self.base_schema.pop(base_rid, None)
                     raise RuntimeError("fail to lock new RID")
        
-            self.index.add_entry(self.key, base_rid, key_val)
-            
-            for c in range(self.num_columns):
-                if c == self.key: # skip since self.key has already been inserted above
-                    continue
-                self.index.add_entry(c, base_rid, values[4 + c])
+            if not defer_index:
+                self.index.add_entry(self.key, base_rid, key_val)
+                
+                for c in range(self.num_columns):
+                    if c == self.key: # skip since self.key has already been inserted above
+                        continue
+                    self.index.add_entry(c, base_rid, values[4 + c])
 
         return base_rid
 
 
     # changed this function up completely for miletsone 3 to return the full context 
-    def update_tail_record(self, base_rid: int, update_cols: dict[int, int]):
+    def update_tail_record(self, base_rid: int, update_cols: dict[int, int], defer_index: bool = False):
         
         if base_rid not in self.page_directory:
             raise KeyError("record not found")
@@ -730,11 +734,12 @@ class Table:
             self.schedule_merge(base_range_id)
             merge_scheduled = True
 
-            for col_id, val in update_cols.items():
-                if col_id == self.key:
-                    continue
-                self.index.update_entry(col_id, base_rid, old_values[col_id], int(val))
-                applied_index_cols.append(col_id)
+            if not defer_index:
+                for col_id, val in update_cols.items():
+                    if col_id == self.key:
+                        continue
+                    self.index.update_entry(col_id, base_rid, old_values[col_id], int(val))
+                    applied_index_cols.append(col_id)
 
             return {
                 "tail_rid": tail_rid,
@@ -792,7 +797,7 @@ class Table:
 
         return Record(base_rid, key_val, cols) # need base_rid returned for update? 
     
-    def delete_context(self, base_rid: int):
+    def delete_context(self, base_rid: int, defer_index: bool = False):
         with self.table_lock:
             if base_rid not in self.page_directory:
                 return None
@@ -807,21 +812,22 @@ class Table:
             self.base_indirection[base_rid] = DELETED_INDIRECTION
 
         removed_cols = []
-        try:
-            for c in range(self.num_columns):
-                self.index.remove_entry(c, base_rid, old_vals[c])
-                removed_cols.append(c)
-        except Exception:
-            with self.table_lock:
-                self.deleted.discard(base_rid)
-                self.base_indirection[base_rid] = old_indirection
-                self.base_schema[base_rid] = old_schema
-            for c in removed_cols:
-                try:
-                    self.index.add_entry(c, base_rid, int(old_vals[c]))
-                except Exception:
-                    pass
-            raise
+        if not defer_index:
+            try:
+                for c in range(self.num_columns):
+                    self.index.remove_entry(c, base_rid, old_vals[c])
+                    removed_cols.append(c)
+            except Exception:
+                with self.table_lock:
+                    self.deleted.discard(base_rid)
+                    self.base_indirection[base_rid] = old_indirection
+                    self.base_schema[base_rid] = old_schema
+                for c in removed_cols:
+                    try:
+                        self.index.add_entry(c, base_rid, int(old_vals[c]))
+                    except Exception:
+                        pass
+                raise
 
         
         return {
@@ -1001,10 +1007,71 @@ class Table:
 
         return rid
 
+
+    # a bunch of indexing helpers 
+
+    def index_insert(self, base_rid: int, inserted_cols: list[int]) -> bool:
+        added_cols = []
+
+        try:
+            for c, val in enumerate(inserted_cols):
+                self.index.add_entry(c, base_rid, int(val))
+                added_cols.append(c)
+            return True;
+
+        except Exception:
+            for c in reversed(added_cols):
+                try:
+                    self.index.remove_entry(c, base_rid, int(inserted_cols[c]))
+                except Exception:
+                    pass
+            
+            return False
+
+
+    def index_update(self, base_rid: int, update_cols: dict[int, int], old_values: list[int]) -> bool:
+        updated_cols = []
+        
+        try:
+            for col_id, new_val in update_cols.items():
+                if col_id == self.key:
+                    continue
+                self.index.update_entry(col_id, base_rid, old_values[col_id], int(new_val))
+                updated_cols.append(col_id)
+            
+            return True
+        
+        except Exception:
+            for col_id in reversed(updated_cols):
+                try:
+                    self.index.update_entry(col_id, base_rid, int(update_cols[col_id]), old_values[col_id])
+                except Exception:
+                    pass
+            return False
+
+
+    def index_delete(self, base_rid: int, old_values: list[int]) -> bool:
+        removed_cols = []
+
+        try:
+            for c, val in enumerate(old_values):
+                self.index.remove_entry(c, base_rid, int(val))
+                removed_cols.append(c)
+            
+            return True
+        
+        except Exception:
+            for c in reversed(removed_cols):
+                try:
+                    self.index.add_entry(c, base_rid, int(old_values[c]))
+                except Exception:
+                    pass
+            return False
+
     
     # a bunch of atomicity rollback helpers 
 
-    def rollback_insert(self, base_rid: int, inserted_cols: list[int]):
+    def rollback_insert(self, base_rid: int, inserted_cols: list[int], index_applied: bool = True):
         
         with self.table_lock:
             if base_rid not in self.page_directory:
@@ -1014,15 +1081,17 @@ class Table:
             self.base_indirection[base_rid] = DELETED_INDIRECTION
             self.base_schema.pop(base_rid, None)
 
-        for c, val in enumerate(inserted_cols):
-            self.index.remove_entry(c, base_rid, int(val))
+        if index_applied:
+            for c, val in enumerate(inserted_cols):
+                self.index.remove_entry(c, base_rid, int(val))
         
         return True
 
 
     def rollback_update(self, base_rid: int, old_tail_rid: int, old_schema: int,
                         update_cols: dict[int, int], old_values: list[int],
-                        tail_rid: int, copy_rid: int, base_range_id: int):
+                        tail_rid: int, copy_rid: int, base_range_id: int, 
+                        index_applied: bool = True):
         
         with self.table_lock:
             if base_rid not in self.page_directory or base_rid in self.deleted:
@@ -1041,15 +1110,17 @@ class Table:
                 pr = self.page_ranges[base_range_id]
                 pr.updates_postmerge = max(0, pr.updates_postmerge - 1)
 
-        for col_id, new_val in update_cols.items():
-            if col_id == self.key:
-                continue
-            self.index.update_entry(col_id, base_rid, int(new_val), old_values[col_id])
+        if index_applied: 
+            for col_id, new_val in update_cols.items():
+                if col_id == self.key:
+                    continue
+                self.index.update_entry(col_id, base_rid, int(new_val), old_values[col_id])
 
         return True
 
 
-    def rollback_delete(self, base_rid: int, old_indirection: int, old_schema: int, old_values: list[int]):
+    def rollback_delete(self, base_rid: int, old_indirection: int, old_schema: int, 
+                        old_values: list[int], index_applied: bool = True):
         
         with self.table_lock:
             if base_rid not in self.page_directory:
@@ -1059,7 +1130,8 @@ class Table:
             self.base_indirection[base_rid] = old_indirection
             self.base_schema[base_rid] = old_schema
 
-        for c, val in enumerate(old_values):
-            self.index.add_entry(c, base_rid, int(val))
+        if index_applied: 
+            for c, val in enumerate(old_values):
+                self.index.add_entry(c, base_rid, int(val))
         
         return True

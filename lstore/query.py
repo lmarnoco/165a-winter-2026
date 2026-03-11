@@ -1,6 +1,11 @@
 from lstore.table import Table, Record, INDIRECTION_COLUMN, INVALID_RID
 from lstore.index import Index
+from lstore.transaction import Aborts
 
+# Saee - Changed up the indexing methodology a bit by adding add_commit function in transacyions file and using that a lot 
+# currently I think that isolation property was not implemented well because reads were deciding before getting locks??
+# Also any of the uncommited index changes are being applied immediately in update rn I think?? 
+# tried adding a bunch of things and fixing how this logically worked in a certain order 
 
 class Query:
     """
@@ -13,7 +18,19 @@ class Query:
         self.table = table
         pass
 
-    
+    def lock_or_abort(self, transaction, rid, mode):
+        if transaction is None:
+            return True
+
+        if transaction.lock_manager.lock(transaction, rid, mode):
+            return True
+
+        if hasattr(transaction, "mark_abort"):
+            transaction.mark_abort(Aborts.LOCK_CONFLICT, f"lock conflict happened for {rid}")
+            
+        return False
+
+
     """
     # internal Method
     # Read a record with specified RID
@@ -23,7 +40,8 @@ class Query:
     def delete(self, primary_key, transaction=None):
         self.table.publish_merge()
         
-        locations = self.table.index.locate(self.table.key, primary_key)
+        temp = transaction is not None
+        locations = self.table.index.locate(self.table.key, primary_key, include_deleted = temp)
         success = False
         seen = set()
 
@@ -37,14 +55,20 @@ class Query:
                 continue
             seen.add(RID)
 
+            if not self.lock_or_abort(transaction, RID, "X"):
+                return False
+
+            '''
             if transaction is not None:
                 locked_aquired = transaction.lock_manager.lock(transaction, RID, "X")
                 if not locked_aquired:
                     return False
-            
+            '''
+
             # removed the try except from the bottom and added the logic here instead
             try:
-                ids = self.table.delete_context(RID)
+                temp = transaction is not None
+                ids = self.table.delete_context(RID, defer_index = temp)
             except Exception:
                 return False
 
@@ -58,8 +82,10 @@ class Query:
                     ids["old_indirection"],
                     ids["old_schema"],
                     ids["old_values"],
+                    False,
                 )
-                
+
+                transaction.add_commit(self.table.index_delete, RID, ids["old_values"])
 
             success = True
         
@@ -78,13 +104,15 @@ class Query:
 
         if transaction is not None:
             pk_lock_id = ("PK", self.table.name, int(key_val))
-            if not transaction.lock_manager.lock(transaction, pk_lock_id, "X"):
+            if not self.lock_or_abort(transaction, pk_lock_id, "X"):
                 return False
         
         try: 
-            base_rid = self.table.insert_base_record(columns, transaction = transaction)
+            temp = transaction is not None
+            base_rid = self.table.insert_base_record(columns, transaction = transaction, defer_index = temp)
             if transaction is not None:
-                transaction.add_undo(self.table.rollback_insert, base_rid, list(columns))
+                transaction.add_undo(self.table.rollback_insert, base_rid, list(columns), False)
+                transaction.add_commit(self.table.index_insert, base_rid, list(columns))
             return True
         except Exception:
             return False
@@ -103,7 +131,8 @@ class Query:
         self.table.publish_merge()
         
         if self.table.index.indices[search_key_index] is not None:
-            rids_list = self.table.index.locate(search_key_index, search_key)
+            temp = transaction is not None
+            rids_list = self.table.index.locate(search_key_index, search_key, include_deleted = temp)
         else:
             with self.table.table_lock:
                 items = list(self.table.page_directory.items())
@@ -114,17 +143,21 @@ class Query:
                 is_tail = meta[1]
                 if is_tail or rid in deleted:
                     continue
+                rids_list.append(rid)
 
-                latest_val = self.table.latest_cols(rid)[search_key_index]
-                if latest_val == search_key:
-                    rids_list.append(rid)
+                #latest_val = self.table.latest_cols(rid)[search_key_index]
+                #if latest_val == search_key:
+                #    rids_list.append(rid)
         
                     
         if not rids_list:
             return []
 
-        #Check if None Maybe? (Will add if need be) --> added this to see if it helps
+        with self.table.table_lock:
+            deleted = set(self.table.deleted)
 
+        #Check if None Maybe? (Will add if need be) --> added this to see if it helps
+        
         result = []
         seen_list = set()
         for rid in rids_list:
@@ -132,9 +165,15 @@ class Query:
                 continue
             seen_list.add(rid)
 
-            if transaction is not None:
-                if not transaction.lock_manager.lock(transaction, rid, "S"):
-                    return False
+            if not self.lock_or_abort(transaction, rid, "S"):
+                return False
+            
+            if rid in deleted:
+                continue
+
+            latest_val = self.table.latest_cols(rid)[search_key_index]
+            if latest_val != search_key:
+                continue
 
             record = self.table.read_record(rid, projected_columns_index)
             if record is not None:
@@ -162,7 +201,8 @@ class Query:
             steps_back = relative_version
 
         if search_key_index == self.table.key and self.table.index.indices[search_key_index] is not None:
-            rids_list = self.table.index.locate(search_key_index, search_key)
+            temp = transaction is not None
+            rids_list = self.table.index.locate(search_key_index, search_key,  include_deleted= temp)
             with self.table.table_lock:
                 deleted = set(self.table.deleted)
         else:
@@ -193,12 +233,11 @@ class Query:
 
             seen.add(base_rid)
 
+            if not self.lock_or_abort(transaction, base_rid, "S"):
+                return False
+
             if base_rid in deleted:
                 continue
-
-            if transaction is not None:
-                if not transaction.lock_manager.lock(transaction, base_rid, "S"):
-                    return False
 
             past_rid = self.table.get_previous_rid(base_rid, steps_back)
 
@@ -240,8 +279,8 @@ class Query:
             # Trying to change the primary key - not allowed
             return False
         
-
-        rids_list = self.table.index.locate(self.table.key, primary_key)
+        temp = transaction is not None
+        rids_list = self.table.index.locate(self.table.key, primary_key, include_deleted = temp)
 
         #Or Locked during something
         if len(rids_list) <= 0:
@@ -255,12 +294,12 @@ class Query:
         #Expect 1
         rid = rids_list[0]
 
-        if transaction is not None:
-            if not transaction.lock_manager.lock(transaction, rid, "X"):
-                return False
+        if not self.lock_or_abort(transaction, rid, "X"):
+            return False
 
         try:  # put the action in a try except so that if table returns error it doesn't crash? 
-            updates = self.table.update_tail_record(rid, update_columns)
+            temp = transaction is not None
+            updates = self.table.update_tail_record(rid, update_columns, defer_index = temp)
             if transaction is not None: 
                 transaction.add_undo(
                     self.table.rollback_update,
@@ -272,7 +311,9 @@ class Query:
                     updates["tail_rid"],
                     updates["copy_rid"],
                     updates["base_range_id"],
+                    False,
                 )
+                transaction.add_commit(self.table.index_update, rid, updates["update_cols"], updates["old_values"])
             return True
         except Exception:
             return False
@@ -291,7 +332,8 @@ class Query:
     def sum(self, start_range, end_range, aggregate_column_index, transaction=None):
         self.table.publish_merge()
         
-        og_rids = self.table.index.locate_range(start_range, end_range, self.table.key)
+        temp = transaction is not None
+        og_rids = self.table.index.locate_range(start_range, end_range, self.table.key, include_deleted = temp)
 
         rids_list = []
 
@@ -301,8 +343,9 @@ class Query:
             else:
                 rids_list.append(rid_or_list)
 
-        rids_list = [rid for rid in rids_list if rid not in self.table.deleted]
+        # rids_list = [rid for rid in rids_list if rid not in self.table.deleted]
         seen = set()
+        count = 0
 
         if len(rids_list) == 0:
             return False
@@ -315,12 +358,18 @@ class Query:
                 continue
             seen.add(rids)
 
-            if transaction is not None:
-                if not transaction.lock_manager.lock(transaction, rids, "S"):
-                    return False
+            if not self.lock_or_abort(transaction, rids, "S"):
+                return False
+
+            if rids in self.table.deleted:
+                continue
         
             latest_rid = self.table.latest_cols(rids)
             result += latest_rid[aggregate_column_index]
+            count += 1
+
+        if count == 0:
+            return False
 
         return result
 
@@ -339,8 +388,8 @@ class Query:
     def sum_version(self, start_range, end_range, aggregate_column_index, relative_version, transaction=None):
         self.table.publish_merge()
 
-
-        og_rids = self.table.index.locate_range(start_range, end_range, self.table.key)
+        temp = transaction is not None
+        og_rids = self.table.index.locate_range(start_range, end_range, self.table.key, include_deleted = temp)
 
         rids_list = []
 
@@ -350,33 +399,38 @@ class Query:
             else:
                 rids_list.append(rid_or_list)
 
-        rids_list = [rid for rid in rids_list if rid not in self.table.deleted]
+        #rids_list = [rid for rid in rids_list if rid not in self.table.deleted]
+
+        if relative_version <= 0: 
+            steps_back = -relative_version 
+        else:
+            steps_back = relative_version
 
         result = 0
         seen = set()
+        count = 0
 
         if len(rids_list) == 0:
             return False
         
         for rids in rids_list:
-
-            if relative_version <= 0:
-                steps_back = -relative_version
-            else:
-                steps_back = relative_version
-
-            past_rids = self.table.get_previous_rid(rids, steps_back)
-
-            if past_rids in seen:
+            if rids in seen:
                 continue
-            seen.add(past_rids)
+            seen.add(rids)
 
-            if transaction is not None:
-                if not transaction.lock_manager.lock(transaction, past_rids, "S"):
-                    return False
+            if not self.lock_or_abort(transaction, rids, "S"):
+                return False
+            
+            if rids in self.table.deleted:
+                continue
                 
+            past_rids = self.table.get_previous_rid(rids, steps_back)
             val = self.table.read_val(past_rids, 4 + aggregate_column_index)
             result += val
+            count += 1
+        
+        if count == 0: 
+            return False
         
         return result
         
@@ -399,15 +453,15 @@ class Query:
 
         r = result[0]
 
-        rid = self.table.index.locate(self.table.key, key)
+        temp = transaction is not None
+        rid = self.table.index.locate(self.table.key, key, include_deleted = temp)
         if not rid:
             return False
         
         real_rid = rid[0]
 
-        if transaction is not None:
-            if not transaction.lock_manager.lock(transaction, real_rid, "X"):
-                return False
+        if not self.lock_or_abort(transaction, real_rid, "X"):
+            return False
                 
         updated_columns = [None] * self.table.num_columns
         updated_columns[column] = r.columns[column] + 1

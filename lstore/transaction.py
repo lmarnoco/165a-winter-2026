@@ -1,6 +1,15 @@
-from lstore.table import Table, Record
-from lstore.index import Index
 from lstore.lock_manager import LockManager
+from enum import Enum, auto
+SHARED_LOCK_MANAGER = LockManager()
+
+# Adding another class that can differentiate between the actual reason for abort 
+# I'm hoping this can help with the aort retries working properly without it going into an infinite loop
+
+class Aborts(Enum):
+    NONE = auto()
+    LOCK_CONFLICT = auto()
+    NON_RETRY = auto()
+    INTERNAL_ERROR = auto()
 
 class Transaction:
 
@@ -15,9 +24,12 @@ class Transaction:
         self.held_locks = []
         #list of (undo_function, arguments)
         self.undo_log = []
+        self.commit_log = []
         self.status = "PENDING"
         self.active_tables = [] 
-        self.lock_manager = LockManager()
+        self.lock_manager = SHARED_LOCK_MANAGER
+        self.abort_reason = Aborts.NONE
+        self.abort_detail = None
         pass
 
     """
@@ -34,6 +46,23 @@ class Transaction:
 
     def add_undo(self, undo_func, *args):
         self.undo_log.append((undo_func, args))
+
+    def add_commit(self, commit_func, *args):
+        self.commit_log.append((commit_func, args))
+
+    def mark_abort(self, reason, detail = None):
+        self.abort_reason = reason
+        self.abort_detail = detail
+
+    # Reset everything before we retry the transaction after an abort happens
+    def reset(self):
+        self.undo_log = []
+        self.commit_log = []
+        self.held_locks = []
+        self.active_tables = []
+        self.status = "PENDING"
+        self.abort_reason = Aborts.NONE
+        self.abort_detail = None
 
     # added these two functions to make sure the transaction lifecycle will work with merges
     # probably going to change a lot of the merge functionalty :(
@@ -61,6 +90,8 @@ class Transaction:
     def run(self):
         self.begin_tables()
         self.status = "RUNNING"
+        self.abort_reason = Aborts.NONE
+        self.abort_detail = None
         
         # I wrapped all this in a try, except block for error handling stuff
         try: 
@@ -68,21 +99,34 @@ class Transaction:
                 result = query(*args, transaction=self)
                 # If the query has failed the transaction should abort
                 if result is False:
+                    if self.abort_reason == Aborts.NONE:
+                        qname = getattr(query, "__name__", str(query))
+                        self.mark_abort(Aborts.NON_RETRY, f"query failed: {qname}")
                     return self.abort()
             return self.commit()
-        except Exception: 
+        
+        except Exception as exception: 
+            if self.abort_reason == Aborts.NONE:
+                self.mark_abort(Aborts.INTERNAL_ERROR, repr(exception))
             return self.abort()
 
     
     def abort(self):
+        undo_errs = []
+
         #reverse the undo log
         for undo_func, args in reversed(self.undo_log):
             try: 
                 undo_func(*args)
-            except Exception:
-                pass
+            except Exception as exception:
+                undo_errs.append(exception)
+             
+        if undo_errs and self.abort_reason == Aborts.NONE:
+            self.mark_abort(Aborts.INTERNAL_ERROR, f"undo failures: {len(undo_errs)}")
+        
         #release all locks (Strict 2PL)
         self.undo_log.clear()
+        self.commit_log.clear()
         self._release_all_locks()
         self.end_tables(committed = False)
         self.status = "ABORTED"
@@ -90,8 +134,23 @@ class Transaction:
 
     
     def commit(self):
+        for commit_func, args in self.commit_log:
+            try:
+                outcome = commit_func(*args)
+                if outcome is False:
+                    self.mark_abort(
+                        Aborts.INTERNAL_ERROR,
+                        f"commit failed: {getattr(commit_func, '__name__', str(commit_func))}",
+                    )
+                    return self.abort()
+
+            except Exception as exception:
+                self.mark_abort(Aborts.INTERNAL_ERROR, repr(exception))
+                return self.abort()
+        
         #persistence handled by the Table/Bufferpool; 
         #commit in 2PL primarily involves releasing locks.
+        self.commit_log.clear()
         self.undo_log.clear()
         self._release_all_locks()
         self.end_tables(committed = True)
